@@ -1,0 +1,17 @@
+{
+  "name": "twitter-video-server",
+  "version": "1.0.0",
+  "description": "Railway server for downloading Google Drive videos and uploading to Twitter",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "express": "^4.18.2",
+    "form-data": "^4.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
