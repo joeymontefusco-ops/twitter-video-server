@@ -122,12 +122,12 @@ async function uploadToTwitter(filePath, credentials) {
   return mediaId;
 }
 
-// Post reply tweet
-async function postReplyTweet(text, mediaId, replyToTweetId, credentials) {
+// Post quote tweet
+async function postQuoteTweet(text, mediaId, quoteTweetId, credentials) {
   const url = 'https://api.twitter.com/2/tweets';
   const body = {
     text,
-    reply: { in_reply_to_tweet_id: replyToTweetId },
+    quote_tweet_id: quoteTweetId,
     ...(mediaId && { media: { media_ids: [mediaId] } }),
   };
 
@@ -195,7 +195,7 @@ app.post('/upload-and-reply', async (req, res) => {
 
     // Post reply tweet
     console.log('Posting reply tweet...');
-    const tweet = await postReplyTweet(replyText || '', mediaId, replyToTweetId, credentials);
+    const tweet = await postQuoteTweet(replyText || '', mediaId, replyToTweetId, credentials);
     console.log('Reply posted:', tweet);
 
     res.json({ success: true, tweet_id: tweet.data?.id, media_id: mediaId });
