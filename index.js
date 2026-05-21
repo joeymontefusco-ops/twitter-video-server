@@ -211,38 +211,31 @@ app.post('/post-thread', async (req, res) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
 
-    // Set cookies for authentication
-    console.log('[puppeteer] Setting cookies...');
+  // Set Twitter cookies first
+    console.log('[puppeteer] Setting Twitter cookies...');
     await page.setCookie(
-      {
-        name: 'auth_token',
-        value: process.env.HF_AUTH_TOKEN,
-        domain: '.twitter.com',
-        path: '/',
-        httpOnly: true,
-        secure: true,
-      },
-      {
-        name: 'ct0',
-        value: process.env.HF_CT0,
-        domain: '.twitter.com',
-        path: '/',
-        secure: true,
-      },
-      {
-        name: '_cioid',
-        value: process.env.HF_CIOID,
-        domain: '.hypefury.com',
-        path: '/',
-      },
-      {
-        name: 'twitterUserId',
-        value: process.env.HF_TWITTER_USER_ID,
-        domain: 'app.hypefury.com',
-        path: '/',
-      }
+      { name: 'auth_token', value: process.env.HF_AUTH_TOKEN, domain: '.twitter.com', path: '/', httpOnly: true, secure: true },
+      { name: 'ct0', value: process.env.HF_CT0, domain: '.twitter.com', path: '/', secure: true }
     );
 
+    // Navigate to Twitter first to establish session
+    console.log('[puppeteer] Navigating to Twitter to establish session...');
+    await page.goto('https://twitter.com', { waitUntil: 'networkidle2', timeout: 30000 });
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Now set Hypefury cookies
+    console.log('[puppeteer] Setting Hypefury cookies...');
+    await page.setCookie(
+      { name: '_cioid', value: process.env.HF_CIOID, domain: '.hypefury.com', path: '/' },
+      { name: 'twitterUserId', value: process.env.HF_TWITTER_USER_ID, domain: 'app.hypefury.com', path: '/' }
+    );
+
+    // Navigate to Hypefury
+    console.log('[puppeteer] Navigating to Hypefury...');
+    await page.goto('https://app.hypefury.com/queue', {
+      waitUntil: 'networkidle2',
+      timeout: 60000,
+    });
     // Navigate to Hypefury
     console.log('[puppeteer] Navigating to Hypefury...');
     await page.goto('https://app.hypefury.com/queue', {
