@@ -1,4 +1,5 @@
 FROM node:18-slim
+# v2 - added chromium
 
 RUN apt-get update && apt-get install -y \
   ffmpeg \
