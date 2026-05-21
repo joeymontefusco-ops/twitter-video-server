@@ -275,10 +275,10 @@ app.post('/post-thread', async (req, res) => {
     return res.status(400).json({ error: 'No tweets to post' });
   }
 
-  // Check if token is available and not expired
-  if (!hypefuryToken || Date.now() > tokenExpiry) {
-    return res.status(401).json({ error: 'Hypefury token expired or missing. Call /refresh-token first.' });
-  }
+ const token = hypefuryToken || process.env.HF_JWT_TOKEN;
+if (!token) {
+  return res.status(401).json({ error: 'No Hypefury token available' });
+}
 
   res.json({ success: true, message: 'Posting thread to Hypefury...' });
 
