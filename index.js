@@ -544,4 +544,7 @@ app.post('/upload-and-reply', async (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', tokenValid: !!hypefuryToken && Date.now() < tokenExpiry }));
 
-app.listen(PORT, () => console.log(`Twitter video server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Twitter video server running on port ${PORT}`);
+  refreshHypefuryToken();
+});
