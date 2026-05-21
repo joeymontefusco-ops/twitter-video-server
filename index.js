@@ -161,7 +161,6 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
 }
 
 // ─── /post-thread — Puppeteer posts thread to Hypefury ────────────────────────
-// Body: { threadData (JSON string or object), category (optional) }
 app.post('/post-thread', async (req, res) => {
   const { threadData, category } = req.body;
 
@@ -177,7 +176,6 @@ app.post('/post-thread', async (req, res) => {
     return res.status(400).json({ error: 'Invalid threadData JSON: ' + e.message });
   }
 
-  // Build tweets array: hook + sections + cta
   const tweets = [
     thread.hook,
     ...(thread.sections || []).map(s => s.content),
@@ -188,7 +186,6 @@ app.post('/post-thread', async (req, res) => {
     return res.status(400).json({ error: 'No tweets to post' });
   }
 
-  // Respond immediately
   res.json({ success: true, message: 'Posting thread to Hypefury...' });
 
   let browser;
@@ -211,32 +208,30 @@ app.post('/post-thread', async (req, res) => {
     const page = await browser.newPage();
     await page.setViewport({ width: 1280, height: 900 });
 
-  // Set Twitter cookies first
-    console.log('[puppeteer] Setting Twitter cookies...');
-    await page.setCookie(
-      { name: 'auth_token', value: process.env.HF_AUTH_TOKEN, domain: '.twitter.com', path: '/', httpOnly: true, secure: true },
-      { name: 'ct0', value: process.env.HF_CT0, domain: '.twitter.com', path: '/', secure: true }
-    );
+    // Load all captured session cookies
+    console.log('[puppeteer] Setting session cookies...');
+    const sessionCookies = [
+      { name: 'amp_2c8edf', value: '2Iw3QDZIeyI102f9fgUQOe.cEx2bVV0R0JEdmhvYWlRUlJrV1Z5MjlRd01yMQ==..1jp55fk50.1jp55fnc3.3.3.6', domain: '.hypefury.com', path: '/' },
+      { name: '_ga', value: 'GA1.1.651649844.1779363689', domain: '.hypefury.com', path: '/' },
+      { name: '_twpid', value: 'tw.1779363689395.548906543416187118', domain: '.hypefury.com', path: '/', secure: true, sameSite: 'Strict' },
+      { name: 'crisp-client%2Fsocket%2Fe6bae4c0-595e-4dc5-b6a7-bba6202f9c6f', value: '1', domain: 'app.hypefury.com', path: '/' },
+      { name: 'crisp-client%2Fsession%2Fe6bae4c0-595e-4dc5-b6a7-bba6202f9c6f', value: 'session_8acafa2b-a787-4b73-bbfa-a6531695ba16', domain: '.hypefury.com', path: '/' },
+      { name: '_clsk', value: '6t32d3%5E1779363732251%5E2%5E1%5Ev.clarity.ms%2Fcollect', domain: '.hypefury.com', path: '/' },
+      { name: '_ga_WTDVJEY7MV', value: 'GS2.1.s1779363689$o1$g1$t1779363732$j17$l0$h0', domain: '.hypefury.com', path: '/' },
+      { name: 'crisp-client%2Fsession%2Fe6bae4c0-595e-4dc5-b6a7-bba6202f9c6f%2FpLvmUtGBDvhoaiQRRkWVy29QwMr1', value: 'session_8acafa2b-a787-4b73-bbfa-a6531695ba16', domain: '.hypefury.com', path: '/' },
+      { name: '_fbp', value: 'fb.1.1779363689455.703885903854238863', domain: '.hypefury.com', path: '/' },
+      { name: '_gcl_au', value: '1.1.1692320563.1779363689', domain: '.hypefury.com', path: '/' },
+      { name: '__sl-fingerprint', value: '016651ea2b534fb903537fbcbc98ee5f', domain: 'app.hypefury.com', path: '/' },
+      { name: '_cioanonid', value: 'ffb166a5-70e8-5936-bb2d-6301b115a168', domain: '.hypefury.com', path: '/' },
+      { name: '_clck', value: '1wb4sc1%5E2%5Eg68%5E0%5E2332', domain: '.hypefury.com', path: '/' },
+      { name: '_cioid', value: 'pLvmUtGBDvhoaiQRRkWVy29QwMr1', domain: '.hypefury.com', path: '/' },
+      { name: '_ga_GL3B0YNRQQ', value: 'GS2.1.s1779363689$o1$g1$t1779363732$j17$l0$h0', domain: '.hypefury.com', path: '/' },
+      { name: 'twitterUserId', value: '1425510781408485376', domain: 'app.hypefury.com', path: '/' },
+    ];
 
-    // Navigate to Twitter first to establish session
-    console.log('[puppeteer] Navigating to Twitter to establish session...');
-    await page.goto('https://twitter.com', { waitUntil: 'networkidle2', timeout: 30000 });
-    await new Promise(r => setTimeout(r, 2000));
+    await page.setCookie(...sessionCookies);
 
-    // Now set Hypefury cookies
-    console.log('[puppeteer] Setting Hypefury cookies...');
-    await page.setCookie(
-      { name: '_cioid', value: process.env.HF_CIOID, domain: '.hypefury.com', path: '/' },
-      { name: 'twitterUserId', value: process.env.HF_TWITTER_USER_ID, domain: 'app.hypefury.com', path: '/' }
-    );
-
-    // Navigate to Hypefury
-    console.log('[puppeteer] Navigating to Hypefury...');
-    await page.goto('https://app.hypefury.com/queue', {
-      waitUntil: 'networkidle2',
-      timeout: 60000,
-    });
-    // Navigate to Hypefury
+    // Navigate directly to Hypefury
     console.log('[puppeteer] Navigating to Hypefury...');
     await page.goto('https://app.hypefury.com/queue', {
       waitUntil: 'networkidle2',
@@ -271,7 +266,6 @@ app.post('/post-thread', async (req, res) => {
       await page.click('[data-cy="compose-add-tweet"]');
       await new Promise(r => setTimeout(r, 1000));
 
-      // Get all textarea inputs and type into the last one
       const textareas = await page.$$('[data-cy="composer-input"]');
       const lastTextarea = textareas[textareas.length - 1];
       await lastTextarea.click();
@@ -286,7 +280,6 @@ app.post('/post-thread', async (req, res) => {
       await page.click('[data-cy="composer-categories-icon"]');
       await new Promise(r => setTimeout(r, 1500));
 
-      // Find and click the category option
       const categoryItems = await page.$$('.popper li, .dropdown-item, [role="option"]');
       for (const item of categoryItems) {
         const text = await item.evaluate(el => el.textContent.trim());
