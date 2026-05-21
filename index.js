@@ -380,7 +380,7 @@ if (!token) {
       payload,
       {
         headers: {
-          'Authorization': `Bearer ${hypefuryToken}`,
+          'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
           'Origin': 'https://app.hypefury.com',
           'Referer': 'https://app.hypefury.com/queue',
