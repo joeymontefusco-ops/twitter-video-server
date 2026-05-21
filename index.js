@@ -16,8 +16,28 @@ const MAX_SIZE_BYTES = 512 * 1024 * 1024;
 const crypto = require('crypto');
 
 // In-memory JWT storage
-let hypefuryToken = null;
-let tokenExpiry = null;
+let hypefuryToken = process.env.HF_JWT_TOKEN || null;
+let tokenExpiry = hypefuryToken ? Date.now() + 50 * 60 * 1000 : null;
+
+async function refreshHypefuryToken() {
+  try {
+    console.log('[token] Refreshing JWT via Firebase...');
+    const res = await axios.post(
+      `https://securetoken.googleapis.com/v1/token?key=${process.env.HF_API_KEY}`,
+      {
+        grant_type: 'refresh_token',
+        refresh_token: process.env.HF_REFRESH_TOKEN,
+      }
+    );
+    hypefuryToken = res.data.id_token;
+    tokenExpiry = Date.now() + 50 * 60 * 1000;
+    console.log('[token] JWT refreshed successfully');
+    return hypefuryToken;
+  } catch (err) {
+    console.error('[token] Failed to refresh JWT:', err.response?.data || err.message);
+    return null;
+  }
+}
 
 function generateOAuthHeader(method, url, params, credentials) {
   const oauthParams = {
@@ -207,45 +227,11 @@ async function loadSessionCookies(page) {
 
 // ─── /refresh-token — Puppeteer captures JWT from Hypefury ────────────────
 app.post('/refresh-token', async (req, res) => {
-  res.json({ success: true, message: 'Refreshing token...' });
-
-  let browser;
-  try {
-    console.log('[token] Launching browser to refresh JWT...');
-    browser = await launchBrowser();
-    const page = await browser.newPage();
-    await page.setViewport({ width: 1280, height: 900 });
-    await loadSessionCookies(page);
-
-    // Intercept requests to capture the JWT
-    let capturedToken = null;
-    page.on('request', request => {
-      const authHeader = request.headers()['authorization'];
-      if (authHeader && authHeader.startsWith('Bearer ')) {
-        capturedToken = authHeader.replace('Bearer ', '');
-        console.log('[token] Captured JWT token');
-      }
-    });
-
-    await page.goto('https://app.hypefury.com/queue', {
-      waitUntil: 'networkidle2',
-      timeout: 60000,
-    });
-
-    await new Promise(r => setTimeout(r, 3000));
-
-    if (capturedToken) {
-      hypefuryToken = capturedToken;
-      tokenExpiry = Date.now() + 50 * 60 * 1000; // 50 minutes
-      console.log('[token] JWT stored successfully, expires in 50 minutes');
-    } else {
-      console.error('[token] Failed to capture JWT token');
-    }
-
-  } catch (err) {
-    console.error('[token] Error:', err.message);
-  } finally {
-    if (browser) await browser.close();
+  const token = await refreshHypefuryToken();
+  if (token) {
+    res.json({ success: true, message: 'Token refreshed successfully' });
+  } else {
+    res.status(500).json({ error: 'Failed to refresh token' });
   }
 });
 
@@ -275,7 +261,11 @@ app.post('/post-thread', async (req, res) => {
     return res.status(400).json({ error: 'No tweets to post' });
   }
 
- const token = hypefuryToken || process.env.HF_JWT_TOKEN;
+// Auto-refresh if expired
+if (!hypefuryToken || Date.now() > tokenExpiry) {
+  await refreshHypefuryToken();
+}
+const token = hypefuryToken;
 if (!token) {
   return res.status(401).json({ error: 'No Hypefury token available' });
 }
