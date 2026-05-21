@@ -4,12 +4,13 @@ const fs = require('fs');
 const path = require('path');
 const { execSync, exec } = require('child_process');
 const FormData = require('form-data');
+const puppeteer = require('puppeteer');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const PORT = process.env.PORT || 3000;
-const MAX_SIZE_BYTES = 512 * 1024 * 1024; // 512MB
+const MAX_SIZE_BYTES = 512 * 1024 * 1024;
 
 const crypto = require('crypto');
 
@@ -40,11 +41,9 @@ function generateOAuthHeader(method, url, params, credentials) {
 
   oauthParams.oauth_signature = signature;
 
-  const headerValue = 'OAuth ' + Object.keys(oauthParams)
+  return 'OAuth ' + Object.keys(oauthParams)
     .map(k => `${encodeURIComponent(k)}="${encodeURIComponent(oauthParams[k])}"`)
     .join(', ');
-
-  return headerValue;
 }
 
 async function uploadToTwitter(filePath, credentials) {
@@ -124,16 +123,12 @@ async function postQuoteTweet(text, mediaId, quoteTweetId, credentials) {
 
   const oauthHeader = generateOAuthHeader('POST', url, {}, credentials);
   const res = await axios.post(url, body, {
-    headers: {
-      Authorization: oauthHeader,
-      'Content-Type': 'application/json',
-    },
+    headers: { Authorization: oauthHeader, 'Content-Type': 'application/json' },
   });
 
   return res.data;
 }
 
-// Extract a single frame from video at given timestamp
 async function extractFrame(videoPath, timestampSec, outputPath) {
   return new Promise((resolve, reject) => {
     const cmd = `ffmpeg -ss ${timestampSec} -i "${videoPath}" -vframes 1 -q:v 2 "${outputPath}" -y`;
@@ -144,7 +139,6 @@ async function extractFrame(videoPath, timestampSec, outputPath) {
   });
 }
 
-// Send a Discord message with optional image attachment
 async function sendDiscordMessage(channelId, content, imagePath, botToken) {
   const form = new FormData();
   form.append('payload_json', JSON.stringify({ content }));
@@ -159,21 +153,175 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
     `https://discord.com/api/v10/channels/${channelId}/messages`,
     form,
     {
-      headers: {
-        ...form.getHeaders(),
-        Authorization: `Bot ${botToken}`,
-      },
+      headers: { ...form.getHeaders(), Authorization: `Bot ${botToken}` },
       timeout: 30000,
     }
   );
   return res.data;
 }
 
+// ─── /post-thread — Puppeteer posts thread to Hypefury ────────────────────────
+// Body: { threadData (JSON string or object), category (optional) }
+app.post('/post-thread', async (req, res) => {
+  const { threadData, category } = req.body;
+
+  if (!threadData) {
+    return res.status(400).json({ error: 'Missing threadData' });
+  }
+
+  let thread;
+  try {
+    thread = typeof threadData === 'string' ? JSON.parse(threadData) : threadData;
+    if (typeof thread === 'string') thread = JSON.parse(thread);
+  } catch (e) {
+    return res.status(400).json({ error: 'Invalid threadData JSON: ' + e.message });
+  }
+
+  // Build tweets array: hook + sections + cta
+  const tweets = [
+    thread.hook,
+    ...(thread.sections || []).map(s => s.content),
+    thread.cta,
+  ].filter(Boolean);
+
+  if (tweets.length === 0) {
+    return res.status(400).json({ error: 'No tweets to post' });
+  }
+
+  // Respond immediately
+  res.json({ success: true, message: 'Posting thread to Hypefury...' });
+
+  let browser;
+  try {
+    console.log('[puppeteer] Launching browser...');
+    browser = await puppeteer.launch({
+      executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || '/usr/bin/chromium',
+      headless: true,
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+      ],
+    });
+
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1280, height: 900 });
+
+    // Set cookies for authentication
+    console.log('[puppeteer] Setting cookies...');
+    await page.setCookie(
+      {
+        name: 'auth_token',
+        value: process.env.HF_AUTH_TOKEN,
+        domain: '.twitter.com',
+        path: '/',
+        httpOnly: true,
+        secure: true,
+      },
+      {
+        name: 'ct0',
+        value: process.env.HF_CT0,
+        domain: '.twitter.com',
+        path: '/',
+        secure: true,
+      },
+      {
+        name: '_cioid',
+        value: process.env.HF_CIOID,
+        domain: '.hypefury.com',
+        path: '/',
+      },
+      {
+        name: 'twitterUserId',
+        value: process.env.HF_TWITTER_USER_ID,
+        domain: 'app.hypefury.com',
+        path: '/',
+      }
+    );
+
+    // Navigate to Hypefury
+    console.log('[puppeteer] Navigating to Hypefury...');
+    await page.goto('https://app.hypefury.com/queue', {
+      waitUntil: 'networkidle2',
+      timeout: 60000,
+    });
+
+    // Check if logged in
+    const url = page.url();
+    console.log('[puppeteer] Current URL:', url);
+
+    if (url.includes('login') || url.includes('auth')) {
+      throw new Error('Not logged in — cookies may have expired');
+    }
+
+    // Click Create button
+    console.log('[puppeteer] Clicking Create...');
+    await page.waitForSelector('[data-cy="sidebar-create-button"]', { timeout: 10000 });
+    await page.click('[data-cy="sidebar-create-button"]');
+    await new Promise(r => setTimeout(r, 2000));
+
+    // Type first tweet (hook)
+    console.log('[puppeteer] Typing hook tweet...');
+    await page.waitForSelector('[data-cy="composer-input"]', { timeout: 10000 });
+    await page.click('[data-cy="composer-input"]');
+    await page.type('[data-cy="composer-input"]', tweets[0], { delay: 10 });
+    await new Promise(r => setTimeout(r, 500));
+
+    // Add remaining tweets
+    for (let i = 1; i < tweets.length; i++) {
+      console.log(`[puppeteer] Adding tweet ${i + 1}...`);
+      await page.waitForSelector('[data-cy="compose-add-tweet"]', { timeout: 5000 });
+      await page.click('[data-cy="compose-add-tweet"]');
+      await new Promise(r => setTimeout(r, 1000));
+
+      // Get all textarea inputs and type into the last one
+      const textareas = await page.$$('[data-cy="composer-input"]');
+      const lastTextarea = textareas[textareas.length - 1];
+      await lastTextarea.click();
+      await lastTextarea.type(tweets[i], { delay: 10 });
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // Add category if provided
+    if (category) {
+      console.log(`[puppeteer] Adding category: ${category}`);
+      await page.waitForSelector('[data-cy="composer-categories-icon"]', { timeout: 5000 });
+      await page.click('[data-cy="composer-categories-icon"]');
+      await new Promise(r => setTimeout(r, 1500));
+
+      // Find and click the category option
+      const categoryItems = await page.$$('.popper li, .dropdown-item, [role="option"]');
+      for (const item of categoryItems) {
+        const text = await item.evaluate(el => el.textContent.trim());
+        if (text.toLowerCase().includes(category.toLowerCase())) {
+          await item.click();
+          console.log(`[puppeteer] Category selected: ${text}`);
+          break;
+        }
+      }
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    // Click Queue button
+    console.log('[puppeteer] Clicking Queue button...');
+    await page.waitForSelector('[data-cy="compose-left-button"]', { timeout: 5000 });
+    await page.click('[data-cy="compose-left-button"]');
+    await new Promise(r => setTimeout(r, 2000));
+
+    console.log('[puppeteer] Thread posted to Hypefury successfully!');
+
+  } catch (err) {
+    console.error('[puppeteer] Error:', err.message);
+  } finally {
+    if (browser) await browser.close();
+  }
+});
+
 // ─── /extract-screenshots ─────────────────────────────────────────────────────
-// Body: {
-//   driveFileId, threadData (JSON string), channelId,
-//   botToken, fileName, discordBotUrl, sanitizedDraft
-// }
 app.post('/extract-screenshots', async (req, res) => {
   const {
     driveFileId,
@@ -191,19 +339,22 @@ app.post('/extract-screenshots', async (req, res) => {
 
   let thread;
   try {
-    thread = typeof threadData === 'string' ? JSON.parse(threadData) : threadData;
+    let parsed = threadData;
+    if (typeof parsed === 'string') {
+      parsed = JSON.parse(parsed);
+      if (typeof parsed === 'string') parsed = JSON.parse(parsed);
+    }
+    thread = parsed;
   } catch (e) {
-    return res.status(400).json({ error: 'Invalid threadData JSON' });
+    return res.status(400).json({ error: 'Invalid threadData JSON: ' + e.message });
   }
 
-  // Respond immediately so n8n doesn't timeout
   res.json({ success: true, message: 'Processing started' });
 
   const tmpVideo = path.join('/tmp', `video_${Date.now()}.mp4`);
   const tmpFrames = [];
 
   try {
-    // Download video from Google Drive
     console.log(`[screenshots] Downloading video ${driveFileId}...`);
     const driveUrl = `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`;
     const response = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
@@ -217,8 +368,6 @@ app.post('/extract-screenshots', async (req, res) => {
     const fileSize = fs.statSync(tmpVideo).size;
     console.log(`[screenshots] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
 
-    // Send hook as first message
-    console.log('[screenshots] Sending hook to Discord...');
     await sendDiscordMessage(
       channelId,
       `<@366635705964953601> 🎬 **New Thread Draft — Review before approving**\n\n📁 Source: \`${fileName || 'Unknown'}\`\n\n**HOOK TWEET:**\n${thread.hook}`,
@@ -228,7 +377,6 @@ app.post('/extract-screenshots', async (req, res) => {
 
     await new Promise(r => setTimeout(r, 500));
 
-    // Extract screenshot for each section and send to Discord
     for (const section of thread.sections || []) {
       const framePath = path.join('/tmp', `frame_${Date.now()}_${section.number}.png`);
       tmpFrames.push(framePath);
@@ -239,28 +387,18 @@ app.post('/extract-screenshots', async (req, res) => {
       try {
         await extractFrame(tmpVideo, section.timestamp_sec, framePath);
         frameExtracted = fs.existsSync(framePath);
-        console.log(`[screenshots] Frame extracted: ${framePath}`);
       } catch (err) {
         console.error(`[screenshots] Frame extraction failed for section ${section.number}:`, err.message);
       }
 
-      await sendDiscordMessage(
-        channelId,
-        section.content,
-        frameExtracted ? framePath : null,
-        botToken
-      );
-
+      await sendDiscordMessage(channelId, section.content, frameExtracted ? framePath : null, botToken);
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // Send CTA
     await sendDiscordMessage(channelId, thread.cta, null, botToken);
     await new Promise(r => setTimeout(r, 500));
 
-    // Send approve/reject buttons via ClickUp bot /send-draft
     if (discordBotUrl && sanitizedDraft) {
-      console.log('[screenshots] Sending approval buttons via bot...');
       await axios.post(`${discordBotUrl}/send-draft`, {
         channelId,
         fileName: fileName || 'Unknown',
@@ -268,7 +406,6 @@ app.post('/extract-screenshots', async (req, res) => {
         driveFileId,
         threadData: typeof threadData === 'string' ? threadData : JSON.stringify(threadData),
       });
-      console.log('[screenshots] Approval buttons sent');
     }
 
     console.log('[screenshots] Thread preview complete');
@@ -325,17 +462,10 @@ app.post('/upload-and-reply', async (req, res) => {
       const targetBitrate = Math.floor((480 * 1024 * 1024 * 8) / 600);
       execSync(`ffmpeg -i ${tmpInput} -b:v ${targetBitrate} -maxrate ${targetBitrate} -bufsize ${targetBitrate * 2} -vcodec libx264 -acodec aac -y ${tmpOutput}`);
       uploadPath = tmpOutput;
-      const newSize = fs.statSync(tmpOutput).size;
-      console.log(`Compressed to: ${(newSize / 1024 / 1024).toFixed(1)}MB`);
     }
 
-    console.log('Uploading to Twitter...');
     const mediaId = await uploadToTwitter(uploadPath, credentials);
-    console.log(`Media uploaded: ${mediaId}`);
-
-    console.log('Posting reply tweet...');
     const tweet = await postQuoteTweet(replyText || '', mediaId, replyToTweetId, credentials);
-    console.log('Reply posted:', tweet);
 
     res.json({ success: true, tweet_id: tweet.data?.id, media_id: mediaId });
 
