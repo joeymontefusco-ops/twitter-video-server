@@ -184,6 +184,82 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
   );
   return res.data;
 }
+// ─── Upload image to Hypefury Firebase Storage ────────────────────────────
+async function uploadImageToHypefury(imagePath, jwtToken) {
+  const imageId = uuidv4();
+  const fileName = `${imageId}.png`;
+  const thumbnailName = `thumbnail-${imageId}.png`;
+  const bucket = 'hypefury-896c7.appspot.com';
+  const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
+  const fileBuffer = fs.readFileSync(imagePath);
+  const fileSize = fileBuffer.length;
+
+  // Upload main image
+  const initRes = await axios.post(
+    `${baseUrl}?name=${fileName}`,
+    { name: fileName },
+    {
+      headers: {
+        'Authorization': `Firebase ${jwtToken}`,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': fileSize.toString(),
+        'X-Goog-Upload-Header-Content-Type': 'image/png',
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const uploadUrl = initRes.headers['x-goog-upload-url'];
+  if (!uploadUrl) throw new Error('No upload URL from Firebase Storage');
+
+  await axios.post(uploadUrl, fileBuffer, {
+    headers: {
+      'Content-Type': 'image/png',
+      'X-Goog-Upload-Command': 'upload, finalize',
+      'X-Goog-Upload-Offset': '0',
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+
+  // Upload thumbnail (same image)
+  const thumbInitRes = await axios.post(
+    `${baseUrl}?name=${thumbnailName}`,
+    { name: thumbnailName },
+    {
+      headers: {
+        'Authorization': `Firebase ${jwtToken}`,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': fileSize.toString(),
+        'X-Goog-Upload-Header-Content-Type': 'image/png',
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const thumbUploadUrl = thumbInitRes.headers['x-goog-upload-url'];
+  if (thumbUploadUrl) {
+    await axios.post(thumbUploadUrl, fileBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-Goog-Upload-Command': 'upload, finalize',
+        'X-Goog-Upload-Offset': '0',
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+  }
+
+  return {
+    name: fileName,
+    type: 'image/png',
+    size: fileSize,
+    altText: '',
+    thumbnail: thumbnailName,
+  };
+}
 
 // ─── Upload video to Gemini Files API ─────────────────────────────────────
 async function uploadVideoToGemini(videoPath) {
@@ -364,7 +440,7 @@ app.post('/refresh-token', async (req, res) => {
 
 // ─── /post-thread ─────────────────────────────────────────────────────────
 app.post('/post-thread', async (req, res) => {
-  const { threadData, category } = req.body;
+  const { threadData, category, driveFileId } = req.body;
 
   if (!threadData) {
     return res.status(400).json({ error: 'Missing threadData' });
@@ -404,15 +480,60 @@ app.post('/post-thread', async (req, res) => {
     const midnight = new Date(now);
     midnight.setUTCHours(16, 0, 0, 0);
 
-    const tweets = tweetTexts.map((text, index) => ({
-      status: text,
-      count: index,
-      media: [],
-      guid: uuidv4().replace(/-/g, '').substring(0, 8) + '-' + uuidv4().replace(/-/g, '').substring(0, 4) + '-11f1-' + uuidv4().replace(/-/g, '').substring(0, 4) + '-' + uuidv4().replace(/-/g, '').substring(0, 12),
-      published: false,
-      quoteTweetData: null,
-      ...(index > 0 ? { isTrusted: true } : {}),
-    }));
+    // Download video and extract frames if driveFileId provided
+    const tmpVideo = path.join('/tmp', `post_video_${Date.now()}.mp4`);
+    const tmpFrames = [];
+    let sectionMediaMap = {};
+
+    if (driveFileId && thread.sections && thread.sections.length > 0) {
+      try {
+        console.log('[post-thread] Downloading video for frame extraction...');
+        const driveUrl = `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`;
+        const dlResponse = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
+        const writer = fs.createWriteStream(tmpVideo);
+        await new Promise((resolve, reject) => {
+          dlResponse.data.pipe(writer);
+          writer.on('finish', resolve);
+          writer.on('error', reject);
+        });
+        console.log('[post-thread] Video downloaded');
+
+        for (const section of thread.sections) {
+          const framePath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}.png`);
+          tmpFrames.push(framePath);
+          try {
+            await extractFrame(tmpVideo, section.timestamp_sec || 0, framePath);
+            if (fs.existsSync(framePath)) {
+              const mediaInfo = await uploadImageToHypefury(framePath, token);
+              if (mediaInfo) {
+                sectionMediaMap[section.number] = mediaInfo;
+                console.log(`[post-thread] Section ${section.number} image uploaded: ${mediaInfo.name}`);
+              }
+            }
+          } catch (frameErr) {
+            console.error(`[post-thread] Frame/upload failed for section ${section.number}:`, frameErr.message);
+          }
+        }
+      } catch (videoErr) {
+        console.error('[post-thread] Video processing failed, posting without images:', videoErr.message);
+      } finally {
+        [tmpVideo, ...tmpFrames].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
+      }
+    }
+
+    const tweets = tweetTexts.map((text, index) => {
+      const section = thread.sections ? thread.sections[index - 1] : null;
+      const media = section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
+      return {
+        status: text,
+        count: index,
+        media,
+        guid: uuidv4().replace(/-/g, '').substring(0, 8) + '-' + uuidv4().replace(/-/g, '').substring(0, 4) + '-11f1-' + uuidv4().replace(/-/g, '').substring(0, 4) + '-' + uuidv4().replace(/-/g, '').substring(0, 12),
+        published: false,
+        quoteTweetData: null,
+        ...(index > 0 ? { isTrusted: true } : {}),
+      };
+    });
 
     const payload = {
       currentUserId: userId,
