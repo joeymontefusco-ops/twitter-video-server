@@ -264,17 +264,18 @@ async function getGeminiTimestamps(fileUri, sections) {
 
   const prompt = `You are analyzing a Madden NFL gameplay video recorded by a content creator named Manu.
 
-For each section below, find the timestamp in the video where the gameplay VISUALLY demonstrates that concept on screen — not when Manu is talking about it, but when you can actually SEE the play happening on the field with players moving, formations visible, or gameplay action occurring.
+For each section below, pick the single best timestamp where the gameplay VISUALLY DESCRIBES what that section is about. The screenshot should make sense as a standalone image that illustrates the section's content — if someone saw just the screenshot and the section text together, it should feel like they match perfectly.
 
 Prioritize frames that show:
-- Active gameplay on the field
-- Clear formation or play setup
-- The specific play or concept being demonstrated
+- The exact play, formation, or concept described in the section text
+- Gameplay action that directly relates to the section title
+- The moment where what Manu is describing is actually happening on screen
 
 Avoid frames that show:
-- Manu talking to camera
-- Menus or playbook screens
-- Loading screens or replays
+- Manu talking to camera or off-screen narration moments
+- Menus, playbook screens, or loading screens
+- Generic gameplay that could belong to any section
+- Transition screens or replays unrelated to the section
 
 Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
 
