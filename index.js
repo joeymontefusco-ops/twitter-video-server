@@ -620,14 +620,19 @@ app.post('/extract-screenshots', async (req, res) => {
 
     // Send approval buttons via ClickUp bot
     if (discordBotUrl && sanitizedDraft) {
-      await axios.post(`${discordBotUrl}/send-draft`, {
-        channelId,
-        fileName: fileName || 'Unknown',
-        draft: sanitizedDraft,
-        driveFileId,
-        threadData: typeof threadData === 'string' ? threadData : JSON.stringify(threadData),
-      });
-    }
+  const updatedThreadData = JSON.stringify({
+    hook: thread.hook,
+    sections: sections,
+    cta: thread.cta,
+  });
+  await axios.post(`${discordBotUrl}/send-draft`, {
+    channelId,
+    fileName: fileName || 'Unknown',
+    draft: sanitizedDraft,
+    driveFileId,
+    threadData: updatedThreadData,
+  });
+}
 
     console.log('[screenshots] Thread preview complete');
 
