@@ -240,7 +240,7 @@ async function uploadVideoToGemini(videoPath) {
   let attempts = 0;
   while (state === 'PROCESSING' && attempts < 30) {
     console.log('[gemini] Waiting for file processing...');
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, 10000));
     const statusRes = await axios.get(
       `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
     );
@@ -305,7 +305,7 @@ ${sectionDescriptions}`;
       ],
       generationConfig: {
         temperature: 0.1,
-        maxOutputTokens: 1024,
+        maxOutputTokens: 2048,
       },
     },
     { timeout: 120000 }
