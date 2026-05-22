@@ -185,6 +185,155 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
   return res.data;
 }
 
+// ─── Upload video to Gemini Files API ─────────────────────────────────────
+async function uploadVideoToGemini(videoPath) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
+
+  const fileSize = fs.statSync(videoPath).size;
+  const mimeType = 'video/mp4';
+  const displayName = path.basename(videoPath);
+
+  console.log('[gemini] Initiating resumable upload to Files API...');
+
+  // Step 1: Initiate resumable upload
+  const initRes = await axios.post(
+    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${apiKey}`,
+    { file: { display_name: displayName } },
+    {
+      headers: {
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': fileSize.toString(),
+        'X-Goog-Upload-Header-Content-Type': mimeType,
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+
+  const uploadUrl = initRes.headers['x-goog-upload-url'];
+  if (!uploadUrl) throw new Error('No upload URL from Gemini Files API');
+
+  console.log(`[gemini] Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB to Gemini...`);
+
+  // Step 2: Upload file in one shot (for files under 200MB) or chunked
+  const fileBuffer = fs.readFileSync(videoPath);
+  const uploadRes = await axios.post(uploadUrl, fileBuffer, {
+    headers: {
+      'Content-Type': mimeType,
+      'X-Goog-Upload-Command': 'upload, finalize',
+      'X-Goog-Upload-Offset': '0',
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    timeout: 300000,
+  });
+
+  const fileUri = uploadRes.data?.file?.uri;
+  const fileName = uploadRes.data?.file?.name;
+  if (!fileUri) throw new Error('No file URI returned from Gemini upload');
+
+  console.log(`[gemini] Upload complete. File URI: ${fileUri}`);
+
+  // Step 3: Wait for file to be processed
+  let state = uploadRes.data?.file?.state;
+  let attempts = 0;
+  while (state === 'PROCESSING' && attempts < 30) {
+    console.log('[gemini] Waiting for file processing...');
+    await new Promise(r => setTimeout(r, 5000));
+    const statusRes = await axios.get(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
+    );
+    state = statusRes.data?.state;
+    attempts++;
+  }
+
+  if (state !== 'ACTIVE') throw new Error(`Gemini file processing failed: state=${state}`);
+
+  console.log('[gemini] File is ACTIVE and ready for analysis');
+  return { fileUri, fileName };
+}
+
+// ─── Get best timestamps from Gemini ──────────────────────────────────────
+async function getGeminiTimestamps(fileUri, sections) {
+  const apiKey = process.env.GEMINI_API_KEY;
+
+  const sectionDescriptions = sections
+    .map(s => `${s.number}. ${s.title}: ${s.content}`)
+    .join('\n\n');
+
+  const prompt = `You are analyzing a Madden NFL gameplay video recorded by a content creator named Manu.
+
+For each section below, find the timestamp in the video where the gameplay VISUALLY demonstrates that concept on screen — not when Manu is talking about it, but when you can actually SEE the play happening on the field with players moving, formations visible, or gameplay action occurring.
+
+Prioritize frames that show:
+- Active gameplay on the field
+- Clear formation or play setup
+- The specific play or concept being demonstrated
+
+Avoid frames that show:
+- Manu talking to camera
+- Menus or playbook screens
+- Loading screens or replays
+
+Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
+
+Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
+
+SECTIONS:
+${sectionDescriptions}`;
+
+  console.log('[gemini] Requesting timestamp analysis...');
+
+  const res = await axios.post(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key=${apiKey}`,
+    {
+      contents: [
+        {
+          parts: [
+            {
+              file_data: {
+                mime_type: 'video/mp4',
+                file_uri: fileUri,
+              },
+            },
+            {
+              text: prompt,
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        temperature: 0.1,
+        maxOutputTokens: 512,
+      },
+    },
+    { timeout: 120000 }
+  );
+
+  const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+  console.log('[gemini] Raw response:', rawText);
+
+  // Parse JSON from response
+  const cleaned = rawText.replace(/```json|```/g, '').trim();
+  const timestamps = JSON.parse(cleaned);
+  console.log('[gemini] Timestamps:', timestamps);
+  return timestamps;
+}
+
+// ─── Delete Gemini file after use ─────────────────────────────────────────
+async function deleteGeminiFile(fileName) {
+  try {
+    const apiKey = process.env.GEMINI_API_KEY;
+    await axios.delete(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
+    );
+    console.log('[gemini] File deleted from Files API');
+  } catch (err) {
+    console.error('[gemini] Failed to delete file:', err.message);
+  }
+}
+
 // ─── Launch Puppeteer browser ──────────────────────────────────────────────
 async function launchBrowser() {
   return puppeteer.launch({
@@ -202,30 +351,7 @@ async function launchBrowser() {
   });
 }
 
-// ─── Load session cookies ──────────────────────────────────────────────────
-async function loadSessionCookies(page) {
-  const sessionCookies = [
-    { name: 'amp_2c8edf', value: '2Iw3QDZIeyI102f9fgUQOe.cEx2bVV0R0JEdmhvYWlRUlJrV1Z5MjlRd01yMQ==..1jp55fk50.1jp55fnc3.3.3.6', domain: '.hypefury.com', path: '/' },
-    { name: '_ga', value: 'GA1.1.651649844.1779363689', domain: '.hypefury.com', path: '/' },
-    { name: '_twpid', value: 'tw.1779363689395.548906543416187118', domain: '.hypefury.com', path: '/', secure: true, sameSite: 'Strict' },
-    { name: 'crisp-client%2Fsocket%2Fe6bae4c0-595e-4dc5-b6a7-bba6202f9c6f', value: '1', domain: 'app.hypefury.com', path: '/' },
-    { name: 'crisp-client%2Fsession%2Fe6bae4c0-595e-4dc5-b6a7-bba6202f9c6f', value: 'session_8acafa2b-a787-4b73-bbfa-a6531695ba16', domain: '.hypefury.com', path: '/' },
-    { name: '_clsk', value: '6t32d3%5E1779363732251%5E2%5E1%5Ev.clarity.ms%2Fcollect', domain: '.hypefury.com', path: '/' },
-    { name: '_ga_WTDVJEY7MV', value: 'GS2.1.s1779363689$o1$g1$t1779363732$j17$l0$h0', domain: '.hypefury.com', path: '/' },
-    { name: 'crisp-client%2Fsession%2Fe6bae4c0-595e-4dc5-b6a7-bba6202f9c6f%2FpLvmUtGBDvhoaiQRRkWVy29QwMr1', value: 'session_8acafa2b-a787-4b73-bbfa-a6531695ba16', domain: '.hypefury.com', path: '/' },
-    { name: '_fbp', value: 'fb.1.1779363689455.703885903854238863', domain: '.hypefury.com', path: '/' },
-    { name: '_gcl_au', value: '1.1.1692320563.1779363689', domain: '.hypefury.com', path: '/' },
-    { name: '__sl-fingerprint', value: '016651ea2b534fb903537fbcbc98ee5f', domain: 'app.hypefury.com', path: '/' },
-    { name: '_cioanonid', value: 'ffb166a5-70e8-5936-bb2d-6301b115a168', domain: '.hypefury.com', path: '/' },
-    { name: '_clck', value: '1wb4sc1%5E2%5Eg68%5E0%5E2332', domain: '.hypefury.com', path: '/' },
-    { name: '_cioid', value: 'pLvmUtGBDvhoaiQRRkWVy29QwMr1', domain: '.hypefury.com', path: '/' },
-    { name: '_ga_GL3B0YNRQQ', value: 'GS2.1.s1779363689$o1$g1$t1779363732$j17$l0$h0', domain: '.hypefury.com', path: '/' },
-    { name: 'twitterUserId', value: '1425510781408485376', domain: 'app.hypefury.com', path: '/' },
-  ];
-  await page.setCookie(...sessionCookies);
-}
-
-// ─── /refresh-token — Puppeteer captures JWT from Hypefury ────────────────
+// ─── /refresh-token ───────────────────────────────────────────────────────
 app.post('/refresh-token', async (req, res) => {
   const token = await refreshHypefuryToken();
   if (token) {
@@ -235,7 +361,7 @@ app.post('/refresh-token', async (req, res) => {
   }
 });
 
-// ─── /post-thread — Posts thread to Hypefury via direct API ───────────────
+// ─── /post-thread ─────────────────────────────────────────────────────────
 app.post('/post-thread', async (req, res) => {
   const { threadData, category } = req.body;
 
@@ -261,14 +387,13 @@ app.post('/post-thread', async (req, res) => {
     return res.status(400).json({ error: 'No tweets to post' });
   }
 
-// Auto-refresh if expired
-if (!hypefuryToken || Date.now() > tokenExpiry) {
-  await refreshHypefuryToken();
-}
-const token = hypefuryToken;
-if (!token) {
-  return res.status(401).json({ error: 'No Hypefury token available' });
-}
+  if (!hypefuryToken || Date.now() > tokenExpiry) {
+    await refreshHypefuryToken();
+  }
+  const token = hypefuryToken;
+  if (!token) {
+    return res.status(401).json({ error: 'No Hypefury token available' });
+  }
 
   res.json({ success: true, message: 'Posting thread to Hypefury...' });
 
@@ -276,9 +401,8 @@ if (!token) {
     const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
     const now = new Date();
     const midnight = new Date(now);
-    midnight.setUTCHours(16, 0, 0, 0); // 4PM UTC = midnight EST
+    midnight.setUTCHours(16, 0, 0, 0);
 
-    // Build tweets array
     const tweets = tweetTexts.map((text, index) => ({
       status: text,
       count: index,
@@ -294,7 +418,7 @@ if (!token) {
       post: {
         midnight: midnight.toISOString(),
         slotType: 'post',
-        time: new Date(now.getTime() + 60 * 60 * 1000).toISOString(), // queue 1 hour from now
+        time: new Date(now.getTime() + 60 * 60 * 1000).toISOString(),
         scheduled: false,
         user: userId,
         publishingError: null,
@@ -418,8 +542,10 @@ app.post('/extract-screenshots', async (req, res) => {
 
   const tmpVideo = path.join('/tmp', `video_${Date.now()}.mp4`);
   const tmpFrames = [];
+  let geminiFileName = null;
 
   try {
+    // Download video from Google Drive
     console.log(`[screenshots] Downloading video ${driveFileId}...`);
     const driveUrl = `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`;
     const response = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
@@ -433,6 +559,32 @@ app.post('/extract-screenshots', async (req, res) => {
     const fileSize = fs.statSync(tmpVideo).size;
     console.log(`[screenshots] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
 
+    // Upload to Gemini and get smart timestamps
+    let sections = thread.sections || [];
+    if (process.env.GEMINI_API_KEY && sections.length > 0) {
+      try {
+        const { fileUri, fileName: gFileName } = await uploadVideoToGemini(tmpVideo);
+        geminiFileName = gFileName;
+
+        const timestamps = await getGeminiTimestamps(fileUri, sections);
+
+        // Update sections with Gemini timestamps
+        sections = sections.map(section => {
+          const match = timestamps.find(t => t.number === section.number);
+          if (match) {
+            console.log(`[gemini] Section ${section.number}: timestamp updated to ${match.timestamp_sec}s`);
+            return { ...section, timestamp_sec: match.timestamp_sec };
+          }
+          return section;
+        });
+
+      } catch (geminiErr) {
+        console.error('[gemini] Analysis failed, falling back to existing timestamps:', geminiErr.message);
+        // Fall back to existing timestamps silently
+      }
+    }
+
+    // Send hook to Discord
     await sendDiscordMessage(
       channelId,
       `<@366635705964953601> 🎬 **New Thread Draft — Review before approving**\n\n📁 Source: \`${fileName || 'Unknown'}\`\n\n**HOOK TWEET:**\n${thread.hook}`,
@@ -442,7 +594,8 @@ app.post('/extract-screenshots', async (req, res) => {
 
     await new Promise(r => setTimeout(r, 500));
 
-    for (const section of thread.sections || []) {
+    // Extract screenshot for each section and send to Discord
+    for (const section of sections) {
       const framePath = path.join('/tmp', `frame_${Date.now()}_${section.number}.png`);
       tmpFrames.push(framePath);
 
@@ -460,9 +613,11 @@ app.post('/extract-screenshots', async (req, res) => {
       await new Promise(r => setTimeout(r, 500));
     }
 
+    // Send CTA
     await sendDiscordMessage(channelId, thread.cta, null, botToken);
     await new Promise(r => setTimeout(r, 500));
 
+    // Send approval buttons via ClickUp bot
     if (discordBotUrl && sanitizedDraft) {
       await axios.post(`${discordBotUrl}/send-draft`, {
         channelId,
@@ -481,9 +636,14 @@ app.post('/extract-screenshots', async (req, res) => {
       await sendDiscordMessage(channelId, `❌ Failed to generate thread preview: ${err.message}`, null, botToken);
     } catch (e) {}
   } finally {
+    // Cleanup local files
     [tmpVideo, ...tmpFrames].forEach(f => {
       try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
     });
+    // Delete from Gemini Files API
+    if (geminiFileName) {
+      await deleteGeminiFile(geminiFileName);
+    }
   }
 });
 
