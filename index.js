@@ -338,20 +338,35 @@ async function getGeminiTimestamps(fileUri, sections) {
     .map(s => `${s.number}. ${s.title}: ${s.content}`)
     .join('\n\n');
 
-  const prompt = `You are analyzing a Madden NFL gameplay video recorded by a content creator named Manu.
+  const prompt = `You are a video frame extraction system for The Madden Academy's Twitter thread automation pipeline.
 
-For each section below, pick the single best timestamp where the gameplay VISUALLY DESCRIBES what that section is about. The screenshot should make sense as a standalone image that illustrates the section's content — if someone saw just the screenshot and the section text together, it should feel like they match perfectly.
+For each section below, find the single best timestamp in the video that shows the most visually informative frame for that section.
 
-Prioritize frames that show:
-- The exact play, formation, or concept described in the section text
-- Gameplay action that directly relates to the section title
-- The moment where what Manu is describing is actually happening on screen
+WHAT A GOOD FRAME LOOKS LIKE:
+A good frame has at least ONE of these:
+- Colored route lines drawn on the field (yellow, red, blue arrows)
+- Player route icons visible (triangle, circle, X markers over receivers)
+- SHOW PLAY panel open on screen
+- Formation name or play name visible on a playbook screen
+- Audible animation actively cycling on the field
 
-Avoid frames that show:
-- Manu talking to camera or off-screen narration moments
-- Menus, playbook screens, or loading screens
-- Generic gameplay that could belong to any section
-- Transition screens or replays unrelated to the section
+A bad frame looks like:
+- Open field with players standing, no overlay
+- Post-snap live action where route lines are already gone
+- Face cam only with no gameplay visible
+- Menus, loading screens, or transition screens
+
+SCANNING LOGIC for each section:
+Step 1 - Find when Manu first verbally mentions the section keyword or concept
+Step 2 - Scan from [that moment - 2s] to [that moment + 12s]
+Step 3 - Pick the FIRST frame that matches in priority order:
+  1. Play art overlay with route lines visible
+  2. SHOW PLAY panel or playbook screen open
+  3. Pre-snap formation with audible animation active
+  4. Replay of the completed play
+  5. Any gameplay (last resort only)
+Step 4 - If nothing good found in that window, scan forward up to +20s total
+Step 5 - If still nothing, pick the best available frame — never skip a section
 
 Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
 
