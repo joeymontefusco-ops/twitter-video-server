@@ -377,6 +377,7 @@ PRIORITY ORDER (pick highest available):
 
 Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
 Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
+IMPORTANT: timestamp_sec must be a plain integer in SECONDS only. Never use MM:SS format. Convert all times to total seconds (e.g. 1:50 = 110, 3:27 = 207).
 
 SECTIONS:
 ${sectionDescriptions}`;
@@ -427,8 +428,9 @@ ${sectionDescriptions}`;
   console.log('[gemini] Raw response:', rawText);
 
   // Parse JSON from response
-  const cleaned = rawText.replace(/```json|```/g, '').trim();
-  const timestamps = JSON.parse(cleaned);
+  // Convert MM:SS format to seconds if needed
+  const normalized = rawText.replace(/```json|```/g, '').trim().replace(/"(\d+):(\d+)"/g, (match, m, s) => `${parseInt(m) * 60 + parseInt(s)}`);
+  const timestamps = JSON.parse(normalized);
   console.log('[gemini] Timestamps:', timestamps);
   return timestamps;
 }
