@@ -360,15 +360,19 @@ async function getGeminiTimestamps(fileUri, sections, videoPath) {
         const imageBuffer = fs.readFileSync(framePath);
         const base64Image = imageBuffer.toString('base64');
 
-        const res = await axios.post(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-          {
-            contents: [
+        const models = ['gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+        let res;
+        for (const model of models) {
+          try {
+            res = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
               {
-                parts: [
-                  { inline_data: { mime_type: 'image/png', data: base64Image } },
+                contents: [
                   {
-                    text: `This is a frame from a Madden NFL gameplay video.
+                    parts: [
+                      { inline_data: { mime_type: 'image/png', data: base64Image } },
+                      {
+                        text: `This is a frame from a Madden NFL gameplay video.
 
 Answer ONLY "yes" or "no".
 
@@ -383,15 +387,20 @@ Do NOT say yes for:
 - Empty field with no overlays
 
 Answer only "yes" or "no":`,
+                      },
+                    ],
                   },
                 ],
+                generationConfig: { temperature: 0, maxOutputTokens: 10 },
               },
-            ],
-            generationConfig: { temperature: 0, maxOutputTokens: 10 },
-          },
-          { timeout: 30000 }
-        );
-
+              { timeout: 30000 }
+            );
+            break;
+          } catch (modelErr) {
+            console.error(`[gemini] Model ${model} failed:`, modelErr.message);
+          }
+        }
+        if (!res) continue;
         const answer = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() || '';
         console.log(`[gemini] Section ${section.number} @ ${t}s → ${answer}`);
 
@@ -428,15 +437,19 @@ Answer only "yes" or "no":`,
           const imageBuffer = fs.readFileSync(framePath);
           const base64Image = imageBuffer.toString('base64');
 
-          const res = await axios.post(
-            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-            {
-              contents: [
-                {
-                  parts: [
-                    { inline_data: { mime_type: 'image/png', data: base64Image } },
-                    {
-                      text: `This is a frame from a Madden NFL gameplay video.
+          const models = ['gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
+        let res;
+        for (const model of models) {
+          try {
+            res = await axios.post(
+              `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+              {
+                contents: [
+                  {
+                    parts: [
+                      { inline_data: { mime_type: 'image/png', data: base64Image } },
+                      {
+                        text: `This is a frame from a Madden NFL gameplay video.
 
 Answer ONLY "yes" or "no".
 
@@ -451,14 +464,20 @@ Do NOT say yes for:
 - Empty field with no overlays
 
 Answer only "yes" or "no":`,
-                    },
-                  ],
-                },
-              ],
-              generationConfig: { temperature: 0, maxOutputTokens: 10 },
-            },
-            { timeout: 30000 }
-          );
+                      },
+                    ],
+                  },
+                ],
+                generationConfig: { temperature: 0, maxOutputTokens: 10 },
+              },
+              { timeout: 30000 }
+            );
+            break;
+          } catch (modelErr) {
+            console.error(`[gemini] Model ${model} failed:`, modelErr.message);
+          }
+        }
+        if (!res) continue;
 
           const answer = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() || '';
           console.log(`[gemini] Section ${section.number} expanded @ ${t}s → ${answer}`);
