@@ -343,18 +343,22 @@ async function getGeminiTimestamps(fileUri, sections) {
 For each section below, find the timestamp where the screen shows pre-snap play art or player route assignments.
 
 WHAT YOU MUST SEE IN THE FRAME (ANY ONE of these is enough to accept a frame):
-- Colored route lines drawn on the field (yellow, red, pink, blue curved/straight arrows extending from receivers)
-- Player route icons floating above receivers (△ ○ □ X markers) — even without route lines, this counts
-- Audible animation cycling on a player icon (glowing/spinning ring around △ ○ □ X)
-- SHOW PLAY panel open on the right side of the screen
-- Playbook or formation screen showing play diagram
+- Colored route lines drawn on the field (yellow, red, pink, blue, purple curved/straight arrows extending from receivers across the field)
+- Player route icons floating above receivers (△ ○ □ X markers) WITH at least one route line also visible on the field
+- Audible animation cycling on a player icon (glowing/spinning ring around △ ○ □ X) WITH route lines visible
+- SHOW PLAY panel open on the right side of the screen WITH route lines visible on the field
+- Playbook screen showing an actual PLAY DIAGRAM with drawn route lines inside the diagram (NOT a formation list)
 
 IMMEDIATELY REJECT any frame that looks like this:
-- Players standing at the line with NO icons, NO route lines, NO overlays of any kind
+- Players standing at the line with NO route lines drawn anywhere on the field
 - Post-snap live action where ball is already in the air or players are running after snap
 - Face cam only with no gameplay visible
 - Menus, scoreboards, loading screens, replays after the play ends
 - Players running mid-play with no pre-snap overlays
+- Formation/playbook SELECTOR screens showing a list of formation names (Nickel, Dime, 5-2, Goal Line, Normal, etc.)
+- SELECT RECEIVER menu showing a popup panel with player names and button icons (R. Moss, P. Paul, J. Wilson, etc.)
+- Any popup menu open on screen BUT no route lines drawn on the field yet
+- SHOW PLAY panel open BUT no route lines visible on the field
 
 SCANNING INSTRUCTIONS per section:
 1. Listen for when Manu first mentions the section keyword or concept verbally
@@ -363,7 +367,7 @@ SCANNING INSTRUCTIONS per section:
    — Manu explains the concept FIRST then shows the play, so start scanning AFTER he speaks
 4. Look for the FIRST frame where ANY of the accepted criteria above are visible
 5. If nothing found in that window → expand to ±45s around verbal mention and keep scanning
-6. NEVER settle for a frame with just players standing and zero overlays
+6. NEVER settle for a frame with players standing and zero route lines on the field
 7. Every section MUST get a timestamp — never skip
 
 PRIORITY ORDER (pick highest available):
