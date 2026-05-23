@@ -331,112 +331,163 @@ async function uploadVideoToGemini(videoPath) {
 }
 
 // ─── Get best timestamps from Gemini ──────────────────────────────────────
-async function getGeminiTimestamps(fileUri, sections) {
+async function getGeminiTimestamps(fileUri, sections, videoPath) {
   const apiKey = process.env.GEMINI_API_KEY;
 
-  const sectionDescriptions = sections
-    .map(s => `${s.number}. ${s.title}: ${s.content}`)
-    .join('\n\n');
+  const results = [];
 
-  const prompt = `You are a video frame extraction system for The Madden Academy's Twitter thread automation pipeline.
+  for (const section of sections) {
+    console.log(`[gemini] Processing section ${section.number}: "${section.title}"...`);
 
-For each section below, find the timestamp where the screen shows pre-snap play art or player route assignments.
+    const estimatedStart = section.timestamp_sec || 0;
+    const windowStart = section.number <= 2
+      ? Math.max(0, estimatedStart - 3)
+      : Math.max(0, estimatedStart + 5);
+    const windowEnd = section.number <= 2
+      ? estimatedStart + 20
+      : estimatedStart + 35;
 
-WHAT YOU MUST SEE IN THE FRAME (ANY ONE of these is enough to accept a frame):
-- Colored route lines drawn on the field (yellow, red, pink, blue, purple curved/straight arrows extending from receivers across the field)
-- Player route icons floating above receivers (△ ○ □ X markers) WITH at least one route line also visible on the field
-- Audible animation cycling on a player icon (glowing/spinning ring around △ ○ □ X) WITH route lines visible
-- SHOW PLAY panel open on the right side of the screen WITH route lines visible on the field
-- Playbook screen showing an actual PLAY DIAGRAM with drawn route lines inside the diagram (NOT a formation list)
+    const FRAME_INTERVAL = 5;
+    let foundTimestamp = null;
 
-IMMEDIATELY REJECT any frame that looks like this:
-- Players standing at the line with NO route lines drawn anywhere on the field
-- Post-snap live action where ball is already in the air or players are running after snap
-- Face cam only with no gameplay visible
-- Menus, scoreboards, loading screens, replays after the play ends
-- Players running mid-play with no pre-snap overlays
-- Formation/playbook SELECTOR screens showing a list of formation names (Nickel, Dime, 5-2, Goal Line, Normal, etc.)
-- SELECT RECEIVER menu showing a popup panel with player names and button icons (R. Moss, P. Paul, J. Wilson, etc.)
-- Any popup menu open on screen BUT no route lines drawn on the field yet
-- SHOW PLAY panel open BUT no route lines visible on the field
+    for (let t = windowStart; t <= windowEnd; t += FRAME_INTERVAL) {
+      const framePath = path.join('/tmp', `validate_frame_${Date.now()}_${section.number}_${t}.png`);
 
-SCANNING INSTRUCTIONS per section:
-1. Listen for when Manu first mentions the section keyword or concept verbally
-2. For sections 1-2: scan from [verbal mention - 3s] to [verbal mention + 20s]
-3. For sections 3 and beyond: scan from [verbal mention + 5s] to [verbal mention + 35s]
-   — Manu explains the concept FIRST then shows the play, so start scanning AFTER he speaks
-4. Look for the FIRST frame where ANY of the accepted criteria above are visible
-5. If nothing found in that window → expand to ±45s around verbal mention and keep scanning
-6. NEVER settle for a frame with players standing and zero route lines on the field
-7. Every section MUST get a timestamp — never skip
+      try {
+        await extractFrame(videoPath, t, framePath);
+        if (!fs.existsSync(framePath)) continue;
 
-PRIORITY ORDER (pick highest available):
-1. SHOW PLAY panel open + route lines visible simultaneously
-2. Route lines drawn on field with player route icons above receivers
-3. Player route icons (△ ○ □ X) floating above receivers with audible animation cycling
-4. Player route icons floating above receivers without animation
-5. SHOW PLAY panel open alone
-6. Playbook or formation screen with play diagram
-7. Pre-snap with any single route line visible (absolute last resort)
+        const imageBuffer = fs.readFileSync(framePath);
+        const base64Image = imageBuffer.toString('base64');
 
-Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
-Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
-IMPORTANT: timestamp_sec must be a plain integer in SECONDS only. Never use MM:SS format. Convert all times to total seconds (e.g. 1:50 = 110, 3:27 = 207).
+        const res = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+          {
+            contents: [
+              {
+                parts: [
+                  { inline_data: { mime_type: 'image/png', data: base64Image } },
+                  {
+                    text: `This is a frame from a Madden NFL gameplay video.
 
-SECTIONS:
-${sectionDescriptions}`;
+Answer ONLY "yes" or "no".
 
-  console.log('[gemini] Requesting timestamp analysis...');
+Does this frame show colored route lines drawn on the football field?
+Route lines are colored arrows or curved/straight lines (yellow, red, pink, blue, purple) extending from player positions across the field showing where receivers will run.
 
-  const models = [
-    'gemini-2.5-flash',
-    'gemini-3.5-flash',
-    'gemini-2.5-pro',
-    'gemini-2.0-flash',
-    'gemini-2.5-flash-lite',
-  ];
+Do NOT say yes for:
+- Players just standing with no lines drawn
+- Formation selector or playbook menu screens
+- SELECT RECEIVER popup menus
+- Post-snap action where ball is already thrown
+- Empty field with no overlays
 
-  let res;
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i];
-    try {
-      console.log(`[gemini] Trying model ${model}...`);
-      res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          contents: [
-            {
-              parts: [
-                { file_data: { mime_type: 'video/mp4', file_uri: fileUri } },
-                { text: prompt },
-              ],
-            },
-          ],
-          generationConfig: {
-            temperature: 0.1,
-            maxOutputTokens: 2048,
+Answer only "yes" or "no":`,
+                  },
+                ],
+              },
+            ],
+            generationConfig: { temperature: 0, maxOutputTokens: 10 },
           },
-        },
-        { timeout: 120000 }
-      );
-      console.log(`[gemini] Success with model ${model}`);
-      break;
-    } catch (modelErr) {
-      console.error(`[gemini] Model ${model} failed:`, modelErr.message);
-      if (i === models.length - 1) throw modelErr;
-      await new Promise(r => setTimeout(r, 3000));
+          { timeout: 30000 }
+        );
+
+        const answer = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() || '';
+        console.log(`[gemini] Section ${section.number} @ ${t}s → ${answer}`);
+
+        if (answer.includes('yes')) {
+          foundTimestamp = t;
+          console.log(`[gemini] ✓ Section ${section.number}: route lines found at ${t}s`);
+          break;
+        }
+
+      } catch (err) {
+        console.error(`[gemini] Frame check failed at ${t}s:`, err.message);
+      } finally {
+        try { if (fs.existsSync(framePath)) fs.unlinkSync(framePath); } catch (e) {}
+      }
+
+      await new Promise(r => setTimeout(r, 500));
     }
+
+    // Expand search if nothing found
+    if (foundTimestamp === null) {
+      console.log(`[gemini] Section ${section.number}: nothing in window, expanding search...`);
+      const expandStart = Math.max(0, estimatedStart - 15);
+      const expandEnd = estimatedStart + 45;
+
+      for (let t = expandStart; t <= expandEnd; t += FRAME_INTERVAL) {
+        if (t >= windowStart && t <= windowEnd) continue;
+
+        const framePath = path.join('/tmp', `validate_expand_${Date.now()}_${section.number}_${t}.png`);
+
+        try {
+          await extractFrame(videoPath, t, framePath);
+          if (!fs.existsSync(framePath)) continue;
+
+          const imageBuffer = fs.readFileSync(framePath);
+          const base64Image = imageBuffer.toString('base64');
+
+          const res = await axios.post(
+            `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
+            {
+              contents: [
+                {
+                  parts: [
+                    { inline_data: { mime_type: 'image/png', data: base64Image } },
+                    {
+                      text: `This is a frame from a Madden NFL gameplay video.
+
+Answer ONLY "yes" or "no".
+
+Does this frame show colored route lines drawn on the football field?
+Route lines are colored arrows or curved/straight lines (yellow, red, pink, blue, purple) extending from player positions across the field showing where receivers will run.
+
+Do NOT say yes for:
+- Players just standing with no lines drawn
+- Formation selector or playbook menu screens
+- SELECT RECEIVER popup menus
+- Post-snap action where ball is already thrown
+- Empty field with no overlays
+
+Answer only "yes" or "no":`,
+                    },
+                  ],
+                },
+              ],
+              generationConfig: { temperature: 0, maxOutputTokens: 10 },
+            },
+            { timeout: 30000 }
+          );
+
+          const answer = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim().toLowerCase() || '';
+          console.log(`[gemini] Section ${section.number} expanded @ ${t}s → ${answer}`);
+
+          if (answer.includes('yes')) {
+            foundTimestamp = t;
+            console.log(`[gemini] ✓ Section ${section.number}: route lines found at ${t}s (expanded)`);
+            break;
+          }
+
+        } catch (err) {
+          console.error(`[gemini] Expanded frame check failed at ${t}s:`, err.message);
+        } finally {
+          try { if (fs.existsSync(framePath)) fs.unlinkAsync(framePath); } catch (e) {}
+        }
+
+        await new Promise(r => setTimeout(r, 500));
+      }
+    }
+
+    results.push({
+      number: section.number,
+      timestamp_sec: foundTimestamp !== null ? foundTimestamp : (section.timestamp_sec || 0),
+    });
+
+    console.log(`[gemini] Section ${section.number} final timestamp: ${results[results.length - 1].timestamp_sec}s`);
   }
 
-  const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-  console.log('[gemini] Raw response:', rawText);
-
-  // Parse JSON from response
-  // Convert MM:SS format to seconds if needed
-  const normalized = rawText.replace(/```json|```/g, '').trim().replace(/"(\d+):(\d+)"/g, (match, m, s) => `${parseInt(m) * 60 + parseInt(s)}`);
-  const timestamps = JSON.parse(normalized);
-  console.log('[gemini] Timestamps:', timestamps);
-  return timestamps;
+  return results;
 }
 
 // ─── Delete Gemini file after use ─────────────────────────────────────────
@@ -729,7 +780,7 @@ app.post('/extract-screenshots', async (req, res) => {
         const { fileUri, fileName: gFileName } = await uploadVideoToGemini(tmpVideo);
         geminiFileName = gFileName;
 
-        const timestamps = await getGeminiTimestamps(fileUri, sections);
+        const timestamps = await getGeminiTimestamps(fileUri, sections, tmpVideo);
 
         // Update sections with Gemini timestamps
         sections = sections.map(section => {
