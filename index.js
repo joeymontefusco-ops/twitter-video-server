@@ -340,36 +340,37 @@ async function getGeminiTimestamps(fileUri, sections) {
 
   const prompt = `You are a video frame extraction system for The Madden Academy's Twitter thread automation pipeline.
 
-For each section below, find the single best timestamp in the video that shows the most visually informative frame for that section.
+For each section below, your ONLY job is to find a timestamp where the screen shows PLAY ART — meaning route lines are drawn on the field.
 
-WHAT A GOOD FRAME LOOKS LIKE:
-A good frame has at least ONE of these:
-- Colored route lines drawn on the field (yellow, red, blue arrows)
-- Player route icons visible (triangle, circle, X markers over receivers)
-- SHOW PLAY panel open on screen
-- Formation name or play name visible on a playbook screen
-- Audible animation actively cycling on the field
+WHAT YOU MUST SEE IN THE FRAME (at least one required):
+- Colored route lines drawn on the field (yellow, red, pink, blue curved/straight arrows extending from receivers)
+- Player route icons floating above receivers (triangle △, circle ○, X ✕, square □ markers)
+- SHOW PLAY panel open on the right side of the screen
+- Playbook or formation screen showing play diagram
 
-A bad frame looks like:
-- Open field with players standing, no overlay
-- Post-snap live action where route lines are already gone
-- Face cam only with no gameplay visible
-- Menus, loading screens, or transition screens
+IMMEDIATELY REJECT any frame that looks like this:
+- Players just standing at the line with no route lines drawn
+- Post-snap live action (ball already snapped, players running)
+- Face cam only with no gameplay
+- Menus, scoreboards, loading screens, replays after the play
 
-SCANNING LOGIC for each section:
-Step 1 - Find when Manu first verbally mentions the section keyword or concept
-Step 2 - Scan from [that moment - 2s] to [that moment + 12s]
-Step 3 - Pick the FIRST frame that matches in priority order:
-  1. Play art overlay with route lines visible
-  2. SHOW PLAY panel or playbook screen open
-  3. Pre-snap formation with audible animation active
-  4. Replay of the completed play
-  5. Any gameplay (last resort only)
-Step 4 - If nothing good found in that window, scan forward up to +20s total
-Step 5 - If still nothing, pick the best available frame — never skip a section
+SCANNING INSTRUCTIONS per section:
+1. Listen for when Manu first mentions the section keyword or concept verbally
+2. Start scanning from [that moment - 3s]
+3. Scan forward up to +25s looking for the FIRST frame where route lines OR play icons are visible on the field
+4. If you find route lines or SHOW PLAY panel → lock that timestamp immediately
+5. If nothing found in 25s window → expand search to ±40s around the verbal mention
+6. NEVER pick a frame with just players standing and no overlay — keep scanning
+7. Every section MUST get a timestamp — never skip
+
+PRIORITY ORDER (pick highest available):
+1. SHOW PLAY panel open + route lines visible simultaneously
+2. Route lines drawn on field with player icons above receivers
+3. SHOW PLAY panel open alone
+4. Playbook/formation screen with play diagram
+5. Pre-snap with audible animation cycling (absolute last resort)
 
 Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
-
 Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
 
 SECTIONS:
@@ -377,31 +378,45 @@ ${sectionDescriptions}`;
 
   console.log('[gemini] Requesting timestamp analysis...');
 
-  const res = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
-    {
-      contents: [
+  const models = [
+    'gemini-2.5-flash',
+    'gemini-3.5-flash',
+    'gemini-2.5-pro',
+    'gemini-2.0-flash',
+    'gemini-2.5-flash-lite',
+  ];
+
+  let res;
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    try {
+      console.log(`[gemini] Trying model ${model}...`);
+      res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
         {
-          parts: [
+          contents: [
             {
-              file_data: {
-                mime_type: 'video/mp4',
-                file_uri: fileUri,
-              },
-            },
-            {
-              text: prompt,
+              parts: [
+                { file_data: { mime_type: 'video/mp4', file_uri: fileUri } },
+                { text: prompt },
+              ],
             },
           ],
+          generationConfig: {
+            temperature: 0.1,
+            maxOutputTokens: 2048,
+          },
         },
-      ],
-      generationConfig: {
-        temperature: 0.1,
-        maxOutputTokens: 2048,
-      },
-    },
-    { timeout: 120000 }
-  );
+        { timeout: 120000 }
+      );
+      console.log(`[gemini] Success with model ${model}`);
+      break;
+    } catch (modelErr) {
+      console.error(`[gemini] Model ${model} failed:`, modelErr.message);
+      if (i === models.length - 1) throw modelErr;
+      await new Promise(r => setTimeout(r, 3000));
+    }
+  }
 
   const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
   console.log('[gemini] Raw response:', rawText);
