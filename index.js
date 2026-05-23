@@ -937,7 +937,7 @@ app.post('/extract-screenshots', async (req, res) => {
 
     // Extract screenshot for each section and send to Discord
     for (const section of sections) {
-      const framePath = path.join('/tmp', `frame_${Date.now()}_${section.number}.png`);
+      const framePath = path.join('/tmp', `frame_${section.number}.png`);
       tmpFrames.push(framePath);
 
       console.log(`[screenshots] Extracting frame at ${section.timestamp_sec}s for section ${section.number}...`);
