@@ -340,35 +340,40 @@ async function getGeminiTimestamps(fileUri, sections) {
 
   const prompt = `You are a video frame extraction system for The Madden Academy's Twitter thread automation pipeline.
 
-For each section below, your ONLY job is to find a timestamp where the screen shows PLAY ART — meaning route lines are drawn on the field.
+For each section below, find the timestamp where the screen shows pre-snap play art or player route assignments.
 
-WHAT YOU MUST SEE IN THE FRAME (at least one required):
+WHAT YOU MUST SEE IN THE FRAME (ANY ONE of these is enough to accept a frame):
 - Colored route lines drawn on the field (yellow, red, pink, blue curved/straight arrows extending from receivers)
-- Player route icons floating above receivers (triangle △, circle ○, X ✕, square □ markers)
+- Player route icons floating above receivers (△ ○ □ X markers) — even without route lines, this counts
+- Audible animation cycling on a player icon (glowing/spinning ring around △ ○ □ X)
 - SHOW PLAY panel open on the right side of the screen
 - Playbook or formation screen showing play diagram
 
 IMMEDIATELY REJECT any frame that looks like this:
-- Players just standing at the line with no route lines drawn
-- Post-snap live action (ball already snapped, players running)
-- Face cam only with no gameplay
-- Menus, scoreboards, loading screens, replays after the play
+- Players standing at the line with NO icons, NO route lines, NO overlays of any kind
+- Post-snap live action where ball is already in the air or players are running after snap
+- Face cam only with no gameplay visible
+- Menus, scoreboards, loading screens, replays after the play ends
+- Players running mid-play with no pre-snap overlays
 
 SCANNING INSTRUCTIONS per section:
 1. Listen for when Manu first mentions the section keyword or concept verbally
-2. Start scanning from [that moment - 3s]
-3. Scan forward up to +25s looking for the FIRST frame where route lines OR play icons are visible on the field
-4. If you find route lines or SHOW PLAY panel → lock that timestamp immediately
-5. If nothing found in 25s window → expand search to ±40s around the verbal mention
-6. NEVER pick a frame with just players standing and no overlay — keep scanning
+2. For sections 1-2: scan from [verbal mention - 3s] to [verbal mention + 20s]
+3. For sections 3 and beyond: scan from [verbal mention + 5s] to [verbal mention + 35s]
+   — Manu explains the concept FIRST then shows the play, so start scanning AFTER he speaks
+4. Look for the FIRST frame where ANY of the accepted criteria above are visible
+5. If nothing found in that window → expand to ±45s around verbal mention and keep scanning
+6. NEVER settle for a frame with just players standing and zero overlays
 7. Every section MUST get a timestamp — never skip
 
 PRIORITY ORDER (pick highest available):
 1. SHOW PLAY panel open + route lines visible simultaneously
-2. Route lines drawn on field with player icons above receivers
-3. SHOW PLAY panel open alone
-4. Playbook/formation screen with play diagram
-5. Pre-snap with audible animation cycling (absolute last resort)
+2. Route lines drawn on field with player route icons above receivers
+3. Player route icons (△ ○ □ X) floating above receivers with audible animation cycling
+4. Player route icons floating above receivers without animation
+5. SHOW PLAY panel open alone
+6. Playbook or formation screen with play diagram
+7. Pre-snap with any single route line visible (absolute last resort)
 
 Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
 Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
