@@ -477,17 +477,21 @@ ${sectionDescriptions}`;
                       {
                         text: `This is a frame from a Madden NFL gameplay video.
 
-Answer ONLY "yes" or "no".
+Answer ONLY "yes" or "no". No explanation.
 
-Does this frame show colored route lines drawn on the football field?
-Route lines are colored arrows or curved/straight lines (yellow, red, pink, blue, purple) extending from player positions across the field showing where receivers will run.
+Does this frame show COLORED ROUTE LINES drawn on the football field?
 
-Do NOT say yes for:
-- Players just standing with no lines drawn
+Route lines MUST be visible as colored arrows or curved/straight lines (yellow, red, pink, blue, purple) that EXTEND FROM PLAYER POSITIONS ACROSS THE FIELD showing the paths receivers will run. These lines must stretch several yards across the field.
+
+CRITICAL - Answer "no" for ALL of these:
+- Players standing at the line with ONLY floating icons (△ ○ □ X) above their heads but NO lines extending from them across the field
+- Players in formation with no colored lines drawn on the grass
+- Post-snap action where ball is already thrown or players are running
 - Formation selector or playbook menu screens
 - SELECT RECEIVER popup menus
-- Post-snap action where ball is already thrown
-- Empty field with no overlays
+- Empty field with no route lines on the grass
+
+Answer "yes" ONLY if you can clearly see colored lines extending from players across the field grass showing receiver routes.
 
 Answer only "yes" or "no":`,
                       },
@@ -556,17 +560,21 @@ Answer only "yes" or "no":`,
                         {
                           text: `This is a frame from a Madden NFL gameplay video.
 
-Answer ONLY "yes" or "no".
+Answer ONLY "yes" or "no". No explanation.
 
-Does this frame show colored route lines drawn on the football field?
-Route lines are colored arrows or curved/straight lines (yellow, red, pink, blue, purple) extending from player positions across the field showing where receivers will run.
+Does this frame show COLORED ROUTE LINES drawn on the football field?
 
-Do NOT say yes for:
-- Players just standing with no lines drawn
+Route lines MUST be visible as colored arrows or curved/straight lines (yellow, red, pink, blue, purple) that EXTEND FROM PLAYER POSITIONS ACROSS THE FIELD showing the paths receivers will run. These lines must stretch several yards across the field.
+
+CRITICAL - Answer "no" for ALL of these:
+- Players standing at the line with ONLY floating icons (△ ○ □ X) above their heads but NO lines extending from them across the field
+- Players in formation with no colored lines drawn on the grass
+- Post-snap action where ball is already thrown or players are running
 - Formation selector or playbook menu screens
 - SELECT RECEIVER popup menus
-- Post-snap action where ball is already thrown
-- Empty field with no overlays
+- Empty field with no route lines on the grass
+
+Answer "yes" ONLY if you can clearly see colored lines extending from players across the field grass showing receiver routes.
 
 Answer only "yes" or "no":`,
                         },
