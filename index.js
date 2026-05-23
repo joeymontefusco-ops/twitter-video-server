@@ -740,9 +740,14 @@ app.post('/post-thread', async (req, res) => {
       }
     }
 
+    // Collect all section images for the hook tweet
+    const allSectionMedia = Object.values(sectionMediaMap);
+
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
-      const media = section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
+      const media = index === 0
+        ? allSectionMedia // hook gets all images
+        : section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
       return {
         status: text,
         count: index,
