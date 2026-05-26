@@ -334,60 +334,48 @@ async function uploadVideoToGemini(videoPath) {
 async function getGeminiTimestamps(fileUri, sections, videoPath) {
   const apiKey = process.env.GEMINI_API_KEY;
 
-  // ── Step 1: Get estimated timestamps from Gemini video analysis ──
   const sectionDescriptions = sections
     .map(s => `${s.number}. ${s.title}: ${s.content}`)
     .join('\n\n');
 
   const prompt = `You are a video frame extraction system for The Madden Academy's Twitter thread automation pipeline.
 
-For each section below, find the timestamp where the screen shows pre-snap play art or player route assignments.
+For each section below, find the single best timestamp in the video where the screen shows OFFENSIVE pre-snap play art with colored route lines drawn on the field.
 
-WHAT YOU MUST SEE IN THE FRAME (ANY ONE of these is enough to accept a frame):
-- Colored route lines drawn on the field (yellow, red, pink, blue, purple curved/straight arrows extending from receivers across the field)
-- Player route icons floating above receivers (△ ○ □ X markers) WITH at least one route line also visible on the field
-- Audible animation cycling on a player icon (glowing/spinning ring around △ ○ □ X) WITH route lines visible
-- SHOW PLAY panel open on the right side of the screen WITH route lines visible on the field
-- Playbook screen showing an actual PLAY DIAGRAM with drawn route lines inside the diagram (NOT a formation list)
+WHAT A GOOD FRAME LOOKS LIKE (must have at least ONE):
+- Colored route lines drawn on the field (yellow, red, pink, blue, purple arrows extending from receivers)
+- SHOW PLAY panel open on the right side with route lines visible
+- Player route icons (△ ○ □ X) floating above receivers WITH route lines drawn
 
-IMMEDIATELY REJECT any frame that looks like this:
-- Players standing at the line with NO route lines drawn anywhere on the field
-- Post-snap live action where ball is already in the air or players are running after snap
-- Face cam only with no gameplay visible
-- Menus, scoreboards, loading screens, replays after the play ends
-- Players running mid-play with no pre-snap overlays
-- Formation/playbook SELECTOR screens showing a list of formation names (Nickel, Dime, 5-2, Goal Line, Normal, etc.)
-- SELECT RECEIVER menu showing a popup panel with player names and button icons (R. Moss, P. Paul, J. Wilson, etc.)
-- Any popup menu open on screen BUT no route lines drawn on the field yet
-- SHOW PLAY panel open BUT no route lines visible on the field
+IMMEDIATELY REJECT these frames:
+- Players standing with NO route lines drawn on the field
+- Defensive coverage zone overlays (DEEP ZONE, CLOUD FLAT, VERT HOOK, 3REC HOOK labels on field)
+- Post-snap live action
+- Formation/playbook selector menus
+- SELECT RECEIVER popup menus
+- Face cam only
 
-SCANNING INSTRUCTIONS per section:
-1. Listen for when Manu first mentions the section keyword or concept verbally
-2. For sections 1-2: scan from [verbal mention - 3s] to [verbal mention + 20s]
-3. For sections 3 and beyond: scan from [verbal mention + 5s] to [verbal mention + 35s]
-   — Manu explains the concept FIRST then shows the play, so start scanning AFTER he speaks
-4. Look for the FIRST frame where ANY of the accepted criteria above are visible
-5. If nothing found in that window → expand to ±45s around verbal mention and keep scanning
-6. NEVER settle for a frame with players standing and zero route lines on the field
-7. Every section MUST get a timestamp — never skip
+SCANNING INSTRUCTIONS:
+1. Find when Manu first verbally mentions the section concept
+2. Scan from [mention - 3s] to [mention + 30s] for offensive route lines
+3. Pick the BEST frame — most route lines visible, clearest play art
+4. Each section MUST have a different timestamp — timestamps must be at least 30 seconds apart from each other
+5. Never pick the same timestamp for two sections
+6. Every section MUST get a timestamp
 
-PRIORITY ORDER (pick highest available):
-1. SHOW PLAY panel open + route lines visible simultaneously
-2. Route lines drawn on field with player route icons above receivers
-3. Player route icons (△ ○ □ X) floating above receivers with audible animation cycling
-4. Player route icons floating above receivers without animation
-5. SHOW PLAY panel open alone
-6. Playbook or formation screen with play diagram
-7. Pre-snap with any single route line visible (absolute last resort)
+PRIORITY ORDER:
+1. SHOW PLAY panel + offensive route lines visible
+2. Multiple colored route lines drawn across the field
+3. Single route line with player icons
 
 Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
 Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
-IMPORTANT: timestamp_sec must be a plain integer in SECONDS only. Never use MM:SS format. Convert all times to total seconds (e.g. 1:50 = 110, 3:27 = 207).
+IMPORTANT: timestamp_sec must be a plain integer in SECONDS only. Never use MM:SS format.
 
 SECTIONS:
 ${sectionDescriptions}`;
 
-  console.log('[gemini] Step 1: Getting estimated timestamps from video analysis...');
+  console.log('[gemini] Getting timestamps from video analysis...');
 
   const models = [
     'gemini-2.5-flash',
@@ -396,7 +384,6 @@ ${sectionDescriptions}`;
     'gemini-2.5-flash-lite',
   ];
 
-  let estimatedTimestamps = [];
   for (let i = 0; i < models.length; i++) {
     const model = models[i];
     try {
@@ -420,17 +407,16 @@ ${sectionDescriptions}`;
       const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
       console.log('[gemini] Raw response:', rawText);
       const normalized = rawText.replace(/```json|```/g, '').trim().replace(/"(\d+):(\d+)"/g, (match, m, s) => `${parseInt(m) * 60 + parseInt(s)}`);
-      estimatedTimestamps = JSON.parse(normalized);
-      console.log('[gemini] Estimated timestamps:', estimatedTimestamps);
-      break;
+      const timestamps = JSON.parse(normalized);
+      console.log('[gemini] Timestamps:', timestamps);
+      return timestamps;
     } catch (modelErr) {
       console.error(`[gemini] Model ${model} failed:`, modelErr.message);
-      if (i === models.length - 1) {
-        console.error('[gemini] All models failed for Step 1, using default windows');
-      }
+      if (i === models.length - 1) throw modelErr;
       await new Promise(r => setTimeout(r, 3000));
     }
   }
+}
 
   // ── Step 2: Frame-by-frame validation using estimated timestamps as anchors ──
   console.log('[gemini] Step 2: Validating frames with yes/no checks...');
