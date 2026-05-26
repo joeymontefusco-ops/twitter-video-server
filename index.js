@@ -229,7 +229,7 @@ async function scoreFrameWithGemini(framePath, apiKey) {
 SCORE THIS FRAME:
 - Return 1 if: colored route lines are drawn on the field (yellow, red, pink, blue arrows extending from receivers) OR the SHOW PLAY panel is open with route lines visible
 - Return 0 if: no route lines drawn, defensive coverage zones shown, live action, menus, face cam only, players standing with no lines
-
+- Return 0 if: no route lines drawn, defensive coverage zones shown, live action, menus, face cam only, players standing with no lines, defensive or offensive playbook menu open showing play diagrams in boxes at top of screen (Cover 1, Cover 3, Dime Rush, formation names visible)
 Respond with ONLY a single digit: 0 or 1. Nothing else.`;
 
   const models = [
