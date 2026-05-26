@@ -154,9 +154,186 @@ async function postQuoteTweet(text, mediaId, quoteTweetId, credentials) {
   return res.data;
 }
 
+// ─── Extract a single frame from video at given timestamp ─────────────────
+// NOTE: -ss AFTER -i = accurate seek (slow but correct frame)
 async function extractFrame(videoPath, timestampSec, outputPath) {
   return new Promise((resolve, reject) => {
-    const cmd = `ffmpeg -ss ${timestampSec} -i "${videoPath}" -vframes 1 -q:v 2 "${outputPath}" -y`;
+    const cmd = `ffmpeg -i "${videoPath}" -ss ${timestampSec} -vframes 1 -vf scale=1920:-1 "${outputPath}" -y`;
+    exec(cmd, (err) => {
+      if (err) reject(err);
+      else resolve(outputPath);
+    });
+  });
+}
+
+// ─── Extract frames every N seconds across entire video ───────────────────
+async function sampleFramesFromVideo(videoPath, intervalSecs = 4) {
+  return new Promise((resolve, reject) => {
+    // First get video duration
+    exec(
+      `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
+      async (err, stdout) => {
+        if (err) return reject(err);
+
+        const duration = parseFloat(stdout.trim());
+        if (!duration || isNaN(duration)) return reject(new Error('Could not determine video duration'));
+
+        console.log(`[sampler] Video duration: ${duration.toFixed(1)}s`);
+
+        const frames = [];
+        const timestamps = [];
+
+        // Skip first 10s (usually intro) and last 10s
+        const start = 10;
+        const end = Math.max(start + intervalSecs, duration - 10);
+
+        for (let t = start; t <= end; t += intervalSecs) {
+          timestamps.push(Math.floor(t));
+        }
+
+        console.log(`[sampler] Extracting ${timestamps.length} frames at ${intervalSecs}s intervals...`);
+
+        // Extract all frames in parallel batches of 10
+        const BATCH = 10;
+        for (let i = 0; i < timestamps.length; i += BATCH) {
+          const batch = timestamps.slice(i, i + BATCH);
+          await Promise.all(
+            batch.map(async (t) => {
+              const framePath = path.join('/tmp', `sample_${Date.now()}_${t}.png`);
+              try {
+                await new Promise((res, rej) => {
+                  // Fast seek for sampling — speed matters more than 1-frame precision here
+                  const cmd = `ffmpeg -ss ${t} -i "${videoPath}" -vframes 1 -vf scale=960:-1 "${framePath}" -y 2>/dev/null`;
+                  exec(cmd, (e) => (e ? rej(e) : res()));
+                });
+                if (fs.existsSync(framePath)) {
+                  frames.push({ timestamp: t, path: framePath });
+                }
+              } catch (e) {
+                // Skip failed frames silently
+              }
+            })
+          );
+        }
+
+        console.log(`[sampler] Extracted ${frames.length} frames`);
+        resolve(frames);
+      }
+    );
+  });
+}
+
+// ─── Score a single frame with Gemini Vision ──────────────────────────────
+async function scoreFrameWithGemini(framePath, apiKey) {
+  const imageBuffer = fs.readFileSync(framePath);
+  const base64Image = imageBuffer.toString('base64');
+
+  const prompt = `You are analyzing a Madden NFL gameplay screenshot to determine if it shows OFFENSIVE pre-snap route art with drawn lines.
+
+SCORE THIS FRAME:
+- Return 1 if: colored route lines are drawn on the field (yellow, red, pink, blue arrows extending from receivers) OR the SHOW PLAY panel is open with route lines visible
+- Return 0 if: no route lines drawn, defensive coverage zones shown, live action, menus, face cam only, players standing with no lines
+
+Respond with ONLY a single digit: 0 or 1. Nothing else.`;
+
+  const models = [
+    'gemini-2.5-flash',
+    'gemini-2.0-flash-001',
+    'gemini-2.0-flash',
+    'gemini-2.5-flash-lite',
+  ];
+
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i];
+    try {
+      const res = await axios.post(
+        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+        {
+          contents: [
+            {
+              parts: [
+                { inline_data: { mime_type: 'image/png', data: base64Image } },
+                { text: prompt },
+              ],
+            },
+          ],
+          generationConfig: { temperature: 0, maxOutputTokens: 8 },
+        },
+        { timeout: 15000 }
+      );
+      const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || '0';
+      return parseInt(text) === 1;
+    } catch (err) {
+      console.error(`[vision] Model ${model} failed for ${path.basename(framePath)}:`, err.message);
+      if (i === models.length - 1) return false;
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+}
+
+// ─── Filter frames: find ones with route lines drawn ─────────────────────
+// Batches calls to avoid rate limits, returns qualifying frames sorted by timestamp
+async function filterFramesWithRouteLines(frames, apiKey) {
+  console.log(`[vision] Scoring ${frames.length} frames for route line detection...`);
+
+  const CONCURRENCY = 5; // parallel Gemini calls at once
+  const results = [];
+
+  for (let i = 0; i < frames.length; i += CONCURRENCY) {
+    const batch = frames.slice(i, i + CONCURRENCY);
+    const scores = await Promise.all(
+      batch.map(async (frame) => {
+        const hasRoutes = await scoreFrameWithGemini(frame.path, apiKey);
+        return { ...frame, hasRoutes };
+      })
+    );
+    results.push(...scores);
+
+    // Brief pause between batches to avoid rate limiting
+    if (i + CONCURRENCY < frames.length) {
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+
+  const qualifying = results.filter(f => f.hasRoutes);
+  console.log(`[vision] ${qualifying.length}/${frames.length} frames have route lines`);
+  return qualifying;
+}
+
+// ─── Pick best frames for each section (spread across video timeline) ─────
+function assignFramesToSections(qualifyingFrames, sections) {
+  if (qualifyingFrames.length === 0) return sections.map(s => ({ ...s, bestFramePath: null }));
+
+  const totalDuration = qualifyingFrames[qualifyingFrames.length - 1].timestamp;
+  const sectionCount = sections.length;
+
+  return sections.map((section, index) => {
+    // Divide video timeline into equal zones, one per section
+    const zoneStart = (totalDuration / sectionCount) * index;
+    const zoneEnd = (totalDuration / sectionCount) * (index + 1);
+
+    // Find frames in this zone
+    const zoneFrames = qualifyingFrames.filter(
+      f => f.timestamp >= zoneStart && f.timestamp < zoneEnd
+    );
+
+    // Fall back to nearest frame if zone is empty
+    const candidates = zoneFrames.length > 0 ? zoneFrames : qualifyingFrames;
+
+    // Pick the middle frame from candidates (avoid very first/last which can be mid-transition)
+    const pick = candidates[Math.floor(candidates.length / 2)];
+
+    console.log(`[assign] Section ${section.number}: picked frame at ${pick.timestamp}s (zone ${Math.floor(zoneStart)}-${Math.floor(zoneEnd)}s)`);
+
+    return { ...section, bestFramePath: pick.path, timestamp_sec: pick.timestamp };
+  });
+}
+
+// ─── Re-extract chosen frame at full 1080p quality ────────────────────────
+async function upscaleFrame(videoPath, timestampSec, outputPath) {
+  return new Promise((resolve, reject) => {
+    // Accurate seek (-ss after -i) at full resolution
+    const cmd = `ffmpeg -i "${videoPath}" -ss ${timestampSec} -vframes 1 -vf scale=1920:-1 -q:v 1 "${outputPath}" -y`;
     exec(cmd, (err) => {
       if (err) reject(err);
       else resolve(outputPath);
@@ -184,6 +361,7 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
   );
   return res.data;
 }
+
 // ─── Upload image to Hypefury Firebase Storage ────────────────────────────
 async function uploadImageToHypefury(imagePath, jwtToken) {
   const imageId = uuidv4();
@@ -194,7 +372,6 @@ async function uploadImageToHypefury(imagePath, jwtToken) {
   const fileBuffer = fs.readFileSync(imagePath);
   const fileSize = fileBuffer.length;
 
-  // Upload main image
   const initRes = await axios.post(
     `${baseUrl}?name=${fileName}`,
     { name: fileName },
@@ -223,7 +400,6 @@ async function uploadImageToHypefury(imagePath, jwtToken) {
     maxBodyLength: Infinity,
   });
 
-  // Upload thumbnail (same image)
   const thumbInitRes = await axios.post(
     `${baseUrl}?name=${thumbnailName}`,
     { name: thumbnailName },
@@ -259,177 +435,6 @@ async function uploadImageToHypefury(imagePath, jwtToken) {
     altText: '',
     thumbnail: thumbnailName,
   };
-}
-
-// ─── Upload video to Gemini Files API ─────────────────────────────────────
-async function uploadVideoToGemini(videoPath) {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) throw new Error('GEMINI_API_KEY not set');
-
-  const fileSize = fs.statSync(videoPath).size;
-  const mimeType = 'video/mp4';
-  const displayName = path.basename(videoPath);
-
-  console.log('[gemini] Initiating resumable upload to Files API...');
-
-  // Step 1: Initiate resumable upload
-  const initRes = await axios.post(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?uploadType=resumable&key=${apiKey}`,
-    { file: { display_name: displayName } },
-    {
-      headers: {
-        'X-Goog-Upload-Protocol': 'resumable',
-        'X-Goog-Upload-Command': 'start',
-        'X-Goog-Upload-Header-Content-Length': fileSize.toString(),
-        'X-Goog-Upload-Header-Content-Type': mimeType,
-        'Content-Type': 'application/json',
-      },
-    }
-  );
-
-  const uploadUrl = initRes.headers['x-goog-upload-url'];
-  if (!uploadUrl) throw new Error('No upload URL from Gemini Files API');
-
-  console.log(`[gemini] Uploading ${(fileSize / 1024 / 1024).toFixed(1)}MB to Gemini...`);
-
-  // Step 2: Upload file in one shot (for files under 200MB) or chunked
-  const fileBuffer = fs.readFileSync(videoPath);
-  const uploadRes = await axios.post(uploadUrl, fileBuffer, {
-    headers: {
-      'Content-Type': mimeType,
-      'X-Goog-Upload-Command': 'upload, finalize',
-      'X-Goog-Upload-Offset': '0',
-    },
-    maxContentLength: Infinity,
-    maxBodyLength: Infinity,
-    timeout: 300000,
-  });
-
-  const fileUri = uploadRes.data?.file?.uri;
-  const fileName = uploadRes.data?.file?.name;
-  if (!fileUri) throw new Error('No file URI returned from Gemini upload');
-
-  console.log(`[gemini] Upload complete. File URI: ${fileUri}`);
-
-  // Step 3: Wait for file to be processed
-  let state = uploadRes.data?.file?.state;
-  let attempts = 0;
-  while (state === 'PROCESSING' && attempts < 30) {
-    console.log('[gemini] Waiting for file processing...');
-    await new Promise(r => setTimeout(r, 10000));
-    const statusRes = await axios.get(
-      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
-    );
-    state = statusRes.data?.state;
-    attempts++;
-  }
-
-  if (state !== 'ACTIVE') throw new Error(`Gemini file processing failed: state=${state}`);
-
-  console.log('[gemini] File is ACTIVE and ready for analysis');
-  return { fileUri, fileName };
-}
-
-// ─── Get best timestamps from Gemini ──────────────────────────────────────
-async function getGeminiTimestamps(fileUri, sections, videoPath) {
-  const apiKey = process.env.GEMINI_API_KEY;
-
-  const sectionDescriptions = sections
-    .map(s => `${s.number}. ${s.title}: ${s.content}`)
-    .join('\n\n');
-
-  const prompt = `You are a video frame extraction system for The Madden Academy's Twitter thread automation pipeline.
-
-For each section below, find the single best timestamp in the video where the screen shows OFFENSIVE pre-snap play art with colored route lines drawn on the field.
-
-WHAT A GOOD FRAME LOOKS LIKE (must have at least ONE):
-- Colored route lines drawn on the field (yellow, red, pink, blue, purple arrows extending from receivers)
-- SHOW PLAY panel open on the right side with route lines visible
-- Player route icons (△ ○ □ X) floating above receivers WITH route lines drawn
-
-IMMEDIATELY REJECT these frames:
-- Players standing with NO route lines drawn on the field
-- Defensive coverage zone overlays (DEEP ZONE, CLOUD FLAT, VERT HOOK, 3REC HOOK labels on field)
-- Post-snap live action
-- Formation/playbook selector menus
-- SELECT RECEIVER popup menus
-- Face cam only
-
-SCANNING INSTRUCTIONS:
-1. Find when Manu first verbally mentions the section concept
-2. Scan from [mention - 3s] to [mention + 30s] for offensive route lines
-3. Pick the BEST frame — most route lines visible, clearest play art
-4. Each section MUST have a different timestamp — timestamps must be at least 30 seconds apart from each other
-5. Never pick the same timestamp for two sections
-6. Every section MUST get a timestamp
-
-PRIORITY ORDER:
-1. SHOW PLAY panel + offensive route lines visible
-2. Multiple colored route lines drawn across the field
-3. Single route line with player icons
-
-Return ONLY a raw JSON array. No explanation, no markdown, no code blocks. Start with [ and end with ].
-Format: [{"number": 1, "timestamp_sec": 45}, {"number": 2, "timestamp_sec": 112}]
-IMPORTANT: timestamp_sec must be a plain integer in SECONDS only. Never use MM:SS format.
-
-SECTIONS:
-${sectionDescriptions}`;
-
-  console.log('[gemini] Getting timestamps from video analysis...');
-
-  const models = [
-    'gemini-2.5-flash',
-    'gemini-2.0-flash-001',
-    'gemini-2.0-flash',
-    'gemini-2.5-flash-lite',
-  ];
-
-  for (let i = 0; i < models.length; i++) {
-    const model = models[i];  
-    try {
-      console.log(`[gemini] Trying model ${model}...`);
-      const res = await axios.post(
-        `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-        {
-          contents: [
-            {
-              parts: [
-                { file_data: { mime_type: 'video/mp4', file_uri: fileUri } },
-                { text: prompt },
-              ],
-            },
-          ],
-          generationConfig: { temperature: 0.1, maxOutputTokens: 2048 },
-        },
-        { timeout: 120000 }
-      );
-      console.log(`[gemini] Success with model ${model}`);
-      const rawText = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '';
-      console.log('[gemini] Raw response:', rawText);
-      const normalized = rawText.replace(/```json|```/g, '').trim().replace(/"(\d+):(\d+)"/g, (match, m, s) => `${parseInt(m) * 60 + parseInt(s)}`);
-      const timestamps = JSON.parse(normalized);
-      console.log('[gemini] Timestamps:', timestamps);
-      return timestamps;
-    } catch (modelErr) {
-      console.error(`[gemini] Model ${model} failed:`, modelErr.message);
-      if (i === models.length - 1) throw modelErr;
-      await new Promise(r => setTimeout(r, 3000));
-    }
-  }
-}
-
-
-// ─── Delete Gemini file after use ─────────────────────────────────────────
-async function deleteGeminiFile(fileName) {
-  try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    await axios.delete(
-      `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`
-    );
-    console.log('[gemini] File deleted from Files API');
-  } catch (err) {
-    console.error('[gemini] Failed to delete file:', err.message);
-  }
 }
 
 // ─── Launch Puppeteer browser ──────────────────────────────────────────────
@@ -501,7 +506,6 @@ app.post('/post-thread', async (req, res) => {
     const midnight = new Date(now);
     midnight.setUTCHours(16, 0, 0, 0);
 
-    // Download video and extract frames if driveFileId provided
     const tmpVideo = path.join('/tmp', `post_video_${Date.now()}.mp4`);
     const tmpFrames = [];
     let sectionMediaMap = {};
@@ -542,13 +546,12 @@ app.post('/post-thread', async (req, res) => {
       }
     }
 
-    // Collect all section images for the hook tweet
     const allSectionMedia = Object.values(sectionMediaMap);
 
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
       const media = index === 0
-        ? allSectionMedia // hook gets all images
+        ? allSectionMedia
         : section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
       return {
         status: text,
@@ -659,6 +662,8 @@ app.post('/post-thread', async (req, res) => {
 });
 
 // ─── /extract-screenshots ─────────────────────────────────────────────────────
+// NEW APPROACH: Sample frames every 4s → Gemini Vision filters for route lines
+// → assign best frames per section → re-extract at 1080p → send to Discord
 app.post('/extract-screenshots', async (req, res) => {
   const {
     driveFileId,
@@ -689,11 +694,11 @@ app.post('/extract-screenshots', async (req, res) => {
   res.json({ success: true, message: 'Processing started' });
 
   const tmpVideo = path.join('/tmp', `video_${Date.now()}.mp4`);
-  const tmpFrames = [];
-  let geminiFileName = null;
+  let sampledFrames = [];
+  let finalFramePaths = [];
 
   try {
-    // Download video from Google Drive
+    // ── Step 1: Download video from Google Drive ───────────────────────────
     console.log(`[screenshots] Downloading video ${driveFileId}...`);
     const driveUrl = `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`;
     const response = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
@@ -705,81 +710,94 @@ app.post('/extract-screenshots', async (req, res) => {
     });
 
     const fileSize = fs.statSync(tmpVideo).size;
+    if (fileSize < 1024 * 100) throw new Error(`Downloaded file too small (${fileSize} bytes) — likely a Drive auth error`);
     console.log(`[screenshots] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
 
-    // Upload to Gemini and get smart timestamps
-    let sections = thread.sections || [];
-    if (process.env.GEMINI_API_KEY && sections.length > 0) {
-      try {
-        const { fileUri, fileName: gFileName } = await uploadVideoToGemini(tmpVideo);
-        geminiFileName = gFileName;
+    // ── Step 2: Sample frames every 4 seconds ─────────────────────────────
+    sampledFrames = await sampleFramesFromVideo(tmpVideo, 4);
 
-        const timestamps = await getGeminiTimestamps(fileUri, sections, tmpVideo);
+    if (sampledFrames.length === 0) {
+      throw new Error('No frames could be extracted from video');
+    }
 
-        // Update sections with Gemini timestamps
-        sections = sections.map(section => {
-          const match = timestamps.find(t => t.number === section.number);
-          if (match) {
-            console.log(`[gemini] Section ${section.number}: timestamp updated to ${match.timestamp_sec}s`);
-            return { ...section, timestamp_sec: match.timestamp_sec };
-          }
-          return section;
-        });
+    // ── Step 3: Gemini Vision filters frames with route lines ──────────────
+    const apiKey = process.env.GEMINI_API_KEY;
+    let qualifyingFrames = [];
 
-      } catch (geminiErr) {
-        console.error('[gemini] Analysis failed, falling back to existing timestamps:', geminiErr.message);
-        // Fall back to existing timestamps silently
+    if (apiKey) {
+      qualifyingFrames = await filterFramesWithRouteLines(sampledFrames, apiKey);
+    }
+
+    // Fallback: if Gemini found nothing, use all frames (spread across timeline)
+    if (qualifyingFrames.length === 0) {
+      console.warn('[screenshots] No qualifying frames found — using evenly spaced fallback frames');
+      qualifyingFrames = sampledFrames;
+    }
+
+    // ── Step 4: Assign one frame per section ──────────────────────────────
+    const sections = thread.sections || [];
+    const sectionsWithFrames = assignFramesToSections(qualifyingFrames, sections);
+
+    // ── Step 5: Re-extract chosen timestamps at full 1080p quality ─────────
+    console.log('[screenshots] Re-extracting chosen frames at full resolution...');
+    for (const section of sectionsWithFrames) {
+      if (section.timestamp_sec != null) {
+        const hqPath = path.join('/tmp', `hq_frame_${section.number}_${Date.now()}.png`);
+        finalFramePaths.push(hqPath);
+        try {
+          await upscaleFrame(tmpVideo, section.timestamp_sec, hqPath);
+          section.hqFramePath = fs.existsSync(hqPath) ? hqPath : section.bestFramePath;
+        } catch (e) {
+          console.error(`[screenshots] HQ re-extract failed for section ${section.number}:`, e.message);
+          section.hqFramePath = section.bestFramePath;
+        }
       }
     }
 
-    // Send hook to Discord
+    // ── Step 6: Send hook to Discord ──────────────────────────────────────
     await sendDiscordMessage(
       channelId,
       `<@366635705964953601> 🎬 **New Thread Draft — Review before approving**\n\n📁 Source: \`${fileName || 'Unknown'}\`\n\n**HOOK TWEET:**\n${thread.hook}`,
       null,
       botToken
     );
-
     await new Promise(r => setTimeout(r, 500));
 
-    // Extract screenshot for each section and send to Discord
-    for (const section of sections) {
-      const framePath = path.join('/tmp', `frame_${section.number}.png`);
-      tmpFrames.push(framePath);
+    // ── Step 7: Send each section tweet + its screenshot to Discord ────────
+    for (const section of sectionsWithFrames) {
+      const framePath = section.hqFramePath || null;
+      const hasFrame = framePath && fs.existsSync(framePath);
 
-      console.log(`[screenshots] Extracting frame at ${section.timestamp_sec}s for section ${section.number}...`);
+      console.log(`[screenshots] Sending section ${section.number} to Discord (frame: ${hasFrame ? section.timestamp_sec + 's' : 'none'})`);
 
-      let frameExtracted = false;
-      try {
-        await extractFrame(tmpVideo, section.timestamp_sec, framePath);
-        frameExtracted = fs.existsSync(framePath);
-      } catch (err) {
-        console.error(`[screenshots] Frame extraction failed for section ${section.number}:`, err.message);
-      }
-
-      await sendDiscordMessage(channelId, section.content, frameExtracted ? framePath : null, botToken);
+      await sendDiscordMessage(channelId, section.content, hasFrame ? framePath : null, botToken);
       await new Promise(r => setTimeout(r, 500));
     }
 
-    // Send CTA
+    // ── Step 8: Send CTA ──────────────────────────────────────────────────
     await sendDiscordMessage(channelId, thread.cta, null, botToken);
     await new Promise(r => setTimeout(r, 500));
 
-    // Send approval buttons via ClickUp bot
+    // ── Step 9: Send approval buttons via ClickUp bot ─────────────────────
     if (discordBotUrl && sanitizedDraft) {
-  const updatedThreadData = JSON.stringify({
-    hook: thread.hook,
-    sections: sections,
-    cta: thread.cta,
-  });
-  await axios.post(`${discordBotUrl}/send-draft`, {
-    channelId,
-    fileName: fileName || 'Unknown',
-    draft: sanitizedDraft,
-    driveFileId,
-    threadData: updatedThreadData,
-  });
-}
+      const updatedThreadData = JSON.stringify({
+        hook: thread.hook,
+        sections: sectionsWithFrames.map(s => ({
+          number: s.number,
+          title: s.title,
+          content: s.content,
+          timestamp_sec: s.timestamp_sec,
+        })),
+        cta: thread.cta,
+      });
+      await axios.post(`${discordBotUrl}/send-draft`, {
+        channelId,
+        fileName: fileName || 'Unknown',
+        draft: sanitizedDraft,
+        driveFileId,
+        threadData: updatedThreadData,
+      });
+    }
 
     console.log('[screenshots] Thread preview complete');
 
@@ -789,18 +807,20 @@ app.post('/extract-screenshots', async (req, res) => {
       await sendDiscordMessage(channelId, `❌ Failed to generate thread preview: ${err.message}`, null, botToken);
     } catch (e) {}
   } finally {
-    // Cleanup local files
-    [tmpVideo, ...tmpFrames].forEach(f => {
-      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
+    // ── Cleanup: delete all temp files ────────────────────────────────────
+    const allTempFiles = [
+      tmpVideo,
+      ...sampledFrames.map(f => f.path),
+      ...finalFramePaths,
+    ];
+    allTempFiles.forEach(f => {
+      try { if (f && fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
     });
-    // Delete from Gemini Files API
-    if (geminiFileName) {
-      await deleteGeminiFile(geminiFileName);
-    }
+    console.log('[screenshots] Temp files cleaned up');
   }
 });
 
-// ─── /upload-and-reply (unchanged) ───────────────────────────────────────────
+// ─── /upload-and-reply ────────────────────────────────────────────────────
 app.post('/upload-and-reply', async (req, res) => {
   const {
     driveUrl,
