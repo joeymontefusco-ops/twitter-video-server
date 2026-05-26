@@ -229,7 +229,7 @@ async function scoreFrameWithGemini(framePath, apiKey) {
 SCORE THIS FRAME:
 - Return 1 if: colored route lines are drawn on the field (yellow, red, pink, blue arrows extending from receivers) OR the SHOW PLAY panel is open with route lines visible
 - Return 0 if: no route lines drawn, defensive coverage zones shown, live action, menus, face cam only, players standing with no lines
-- Return 0 if: no route lines drawn, defensive coverage zones shown, live action, menus, face cam only, players standing with no lines, defensive or offensive playbook menu open showing play diagrams in boxes at top of screen (Cover 1, Cover 3, Dime Rush, formation names visible)
+
 Respond with ONLY a single digit: 0 or 1. Nothing else.`;
 
   const models = [
@@ -305,17 +305,35 @@ function assignFramesToSections(qualifyingFrames, sections) {
   const totalDuration = qualifyingFrames[qualifyingFrames.length - 1].timestamp;
   const sectionCount = sections.length;
 
+  // Track used timestamps to avoid duplicates across sections
+  const usedTimestamps = new Set();
+
   return sections.map((section, index) => {
     const zoneStart = (totalDuration / sectionCount) * index;
     const zoneEnd = (totalDuration / sectionCount) * (index + 1);
+    const zoneCenter = (zoneStart + zoneEnd) / 2;
 
+    // Prefer frames in this zone that haven't been used yet
     const zoneFrames = qualifyingFrames.filter(
-      f => f.timestamp >= zoneStart && f.timestamp < zoneEnd
+      f => f.timestamp >= zoneStart && f.timestamp < zoneEnd && !usedTimestamps.has(f.timestamp)
     );
 
-    const candidates = zoneFrames.length > 0 ? zoneFrames : qualifyingFrames;
-    const pick = candidates[Math.floor(candidates.length / 2)];
+    let pick;
+    if (zoneFrames.length > 0) {
+      // Pick the frame closest to the center of the zone
+      pick = zoneFrames.reduce((best, f) =>
+        Math.abs(f.timestamp - zoneCenter) < Math.abs(best.timestamp - zoneCenter) ? f : best
+      );
+    } else {
+      // Fallback: pick the unused qualifying frame closest to zone center
+      const unused = qualifyingFrames.filter(f => !usedTimestamps.has(f.timestamp));
+      const pool = unused.length > 0 ? unused : qualifyingFrames;
+      pick = pool.reduce((best, f) =>
+        Math.abs(f.timestamp - zoneCenter) < Math.abs(best.timestamp - zoneCenter) ? f : best
+      );
+    }
 
+    usedTimestamps.add(pick.timestamp);
     console.log(`[assign] Section ${section.number}: frame at ${pick.timestamp}s (zone ${Math.floor(zoneStart)}-${Math.floor(zoneEnd)}s)`);
 
     return { ...section, bestFramePath: pick.path, timestamp_sec: pick.timestamp };
