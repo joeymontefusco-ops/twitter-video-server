@@ -154,22 +154,21 @@ async function postQuoteTweet(text, mediaId, quoteTweetId, credentials) {
   return res.data;
 }
 
-// ─── Extract a single frame from video at given timestamp ─────────────────
-// NOTE: -ss AFTER -i = accurate seek (slow but correct frame)
+// ─── Extract a single frame at full resolution (accurate seek) ────────────
 async function extractFrame(videoPath, timestampSec, outputPath) {
   return new Promise((resolve, reject) => {
     const cmd = `ffmpeg -i "${videoPath}" -ss ${timestampSec} -vframes 1 -vf scale=1920:-1 "${outputPath}" -y`;
-    exec(cmd, (err) => {
+    exec(cmd, { timeout: 30000 }, (err) => {
       if (err) reject(err);
       else resolve(outputPath);
     });
   });
 }
 
-// ─── Extract frames every N seconds across entire video ───────────────────
-async function sampleFramesFromVideo(videoPath, intervalSecs = 4) {
+// ─── Sample frames sequentially across entire video ───────────────────────
+// Sequential (not parallel) to avoid crashing Railway container
+async function sampleFramesFromVideo(videoPath, intervalSecs = 3) {
   return new Promise((resolve, reject) => {
-    // First get video duration
     exec(
       `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${videoPath}"`,
       async (err, stdout) => {
@@ -180,50 +179,47 @@ async function sampleFramesFromVideo(videoPath, intervalSecs = 4) {
 
         console.log(`[sampler] Video duration: ${duration.toFixed(1)}s`);
 
-        const frames = [];
-        const timestamps = [];
-
         // Skip first 10s (usually intro) and last 10s
         const start = 10;
         const end = Math.max(start + intervalSecs, duration - 10);
-
+        const timestamps = [];
         for (let t = start; t <= end; t += intervalSecs) {
           timestamps.push(Math.floor(t));
         }
 
-        console.log(`[sampler] Extracting ${timestamps.length} frames at ${intervalSecs}s intervals...`);
+        console.log(`[sampler] Extracting ${timestamps.length} frames at ${intervalSecs}s intervals (sequential)...`);
 
-        // Extract all frames in parallel batches of 10
-        const BATCH = 10;
-        for (let i = 0; i < timestamps.length; i += BATCH) {
-          const batch = timestamps.slice(i, i + BATCH);
-          await Promise.all(
-            batch.map(async (t) => {
-              const framePath = path.join('/tmp', `sample_${Date.now()}_${t}.png`);
-              try {
-                await new Promise((res, rej) => {
-                  // Fast seek for sampling — speed matters more than 1-frame precision here
-                  const cmd = `ffmpeg -ss ${t} -i "${videoPath}" -vframes 1 -vf scale=960:-1 "${framePath}" -y 2>/dev/null`;
-                  exec(cmd, (e) => (e ? rej(e) : res()));
-                });
-                if (fs.existsSync(framePath)) {
-                  frames.push({ timestamp: t, path: framePath });
-                }
-              } catch (e) {
-                // Skip failed frames silently
-              }
-            })
-          );
+        const frames = [];
+
+        // Sequential — one FFmpeg process at a time
+        for (const t of timestamps) {
+          const framePath = path.join('/tmp', `sample_${t}.png`);
+          try {
+            await new Promise((res, rej) => {
+              const cmd = `ffmpeg -ss ${t} -i "${videoPath}" -vframes 1 -vf scale=960:-1 "${framePath}" -y 2>/dev/null`;
+              exec(cmd, { timeout: 15000 }, (e) => (e ? rej(e) : res()));
+            });
+            if (fs.existsSync(framePath)) {
+              frames.push({ timestamp: t, path: framePath });
+            }
+          } catch (e) {
+            console.error(`[sampler] Frame at ${t}s failed:`, e.message);
+          }
+
+          // Log progress every 20 frames
+          if (frames.length > 0 && frames.length % 20 === 0) {
+            console.log(`[sampler] Progress: ${frames.length}/${timestamps.length} frames extracted`);
+          }
         }
 
-        console.log(`[sampler] Extracted ${frames.length} frames`);
+        console.log(`[sampler] Done: ${frames.length} frames extracted`);
         resolve(frames);
       }
     );
   });
 }
 
-// ─── Score a single frame with Gemini Vision ──────────────────────────────
+// ─── Score a single frame with Gemini Vision (with model fallback) ─────────
 async function scoreFrameWithGemini(framePath, apiKey) {
   const imageBuffer = fs.readFileSync(framePath);
   const base64Image = imageBuffer.toString('base64');
@@ -269,14 +265,14 @@ Respond with ONLY a single digit: 0 or 1. Nothing else.`;
       await new Promise(r => setTimeout(r, 1000));
     }
   }
+  return false;
 }
 
-// ─── Filter frames: find ones with route lines drawn ─────────────────────
-// Batches calls to avoid rate limits, returns qualifying frames sorted by timestamp
+// ─── Filter frames: find ones with route lines drawn ──────────────────────
 async function filterFramesWithRouteLines(frames, apiKey) {
   console.log(`[vision] Scoring ${frames.length} frames for route line detection...`);
 
-  const CONCURRENCY = 5; // parallel Gemini calls at once
+  const CONCURRENCY = 5;
   const results = [];
 
   for (let i = 0; i < frames.length; i += CONCURRENCY) {
@@ -289,18 +285,20 @@ async function filterFramesWithRouteLines(frames, apiKey) {
     );
     results.push(...scores);
 
-    // Brief pause between batches to avoid rate limiting
+    const found = results.filter(f => f.hasRoutes).length;
+    console.log(`[vision] Batch ${Math.floor(i / CONCURRENCY) + 1}: ${found} qualifying frames so far`);
+
     if (i + CONCURRENCY < frames.length) {
       await new Promise(r => setTimeout(r, 500));
     }
   }
 
   const qualifying = results.filter(f => f.hasRoutes);
-  console.log(`[vision] ${qualifying.length}/${frames.length} frames have route lines`);
+  console.log(`[vision] Final: ${qualifying.length}/${frames.length} frames have route lines`);
   return qualifying;
 }
 
-// ─── Pick best frames for each section (spread across video timeline) ─────
+// ─── Assign best frame per section spread across video timeline ───────────
 function assignFramesToSections(qualifyingFrames, sections) {
   if (qualifyingFrames.length === 0) return sections.map(s => ({ ...s, bestFramePath: null }));
 
@@ -308,22 +306,17 @@ function assignFramesToSections(qualifyingFrames, sections) {
   const sectionCount = sections.length;
 
   return sections.map((section, index) => {
-    // Divide video timeline into equal zones, one per section
     const zoneStart = (totalDuration / sectionCount) * index;
     const zoneEnd = (totalDuration / sectionCount) * (index + 1);
 
-    // Find frames in this zone
     const zoneFrames = qualifyingFrames.filter(
       f => f.timestamp >= zoneStart && f.timestamp < zoneEnd
     );
 
-    // Fall back to nearest frame if zone is empty
     const candidates = zoneFrames.length > 0 ? zoneFrames : qualifyingFrames;
-
-    // Pick the middle frame from candidates (avoid very first/last which can be mid-transition)
     const pick = candidates[Math.floor(candidates.length / 2)];
 
-    console.log(`[assign] Section ${section.number}: picked frame at ${pick.timestamp}s (zone ${Math.floor(zoneStart)}-${Math.floor(zoneEnd)}s)`);
+    console.log(`[assign] Section ${section.number}: frame at ${pick.timestamp}s (zone ${Math.floor(zoneStart)}-${Math.floor(zoneEnd)}s)`);
 
     return { ...section, bestFramePath: pick.path, timestamp_sec: pick.timestamp };
   });
@@ -332,9 +325,8 @@ function assignFramesToSections(qualifyingFrames, sections) {
 // ─── Re-extract chosen frame at full 1080p quality ────────────────────────
 async function upscaleFrame(videoPath, timestampSec, outputPath) {
   return new Promise((resolve, reject) => {
-    // Accurate seek (-ss after -i) at full resolution
     const cmd = `ffmpeg -i "${videoPath}" -ss ${timestampSec} -vframes 1 -vf scale=1920:-1 -q:v 1 "${outputPath}" -y`;
-    exec(cmd, (err) => {
+    exec(cmd, { timeout: 30000 }, (err) => {
       if (err) reject(err);
       else resolve(outputPath);
     });
@@ -661,9 +653,9 @@ app.post('/post-thread', async (req, res) => {
   }
 });
 
-// ─── /extract-screenshots ─────────────────────────────────────────────────────
-// NEW APPROACH: Sample frames every 4s → Gemini Vision filters for route lines
-// → assign best frames per section → re-extract at 1080p → send to Discord
+// ─── /extract-screenshots ─────────────────────────────────────────────────
+// Approach: sample frames every 6s → Gemini Vision filters for route lines
+// → assign best frame per section → re-extract at 1080p → send to Discord
 app.post('/extract-screenshots', async (req, res) => {
   const {
     driveFileId,
@@ -698,7 +690,7 @@ app.post('/extract-screenshots', async (req, res) => {
   let finalFramePaths = [];
 
   try {
-    // ── Step 1: Download video from Google Drive ───────────────────────────
+    // ── Step 1: Download video ─────────────────────────────────────────────
     console.log(`[screenshots] Downloading video ${driveFileId}...`);
     const driveUrl = `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`;
     const response = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
@@ -713,12 +705,9 @@ app.post('/extract-screenshots', async (req, res) => {
     if (fileSize < 1024 * 100) throw new Error(`Downloaded file too small (${fileSize} bytes) — likely a Drive auth error`);
     console.log(`[screenshots] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
 
-    // ── Step 2: Sample frames every 4 seconds ─────────────────────────────
-    sampledFrames = await sampleFramesFromVideo(tmpVideo, 4);
-
-    if (sampledFrames.length === 0) {
-      throw new Error('No frames could be extracted from video');
-    }
+    // ── Step 2: Sample frames every 6s (sequential) ───────────────────────
+    sampledFrames = await sampleFramesFromVideo(tmpVideo, 3);
+    if (sampledFrames.length === 0) throw new Error('No frames could be extracted from video');
 
     // ── Step 3: Gemini Vision filters frames with route lines ──────────────
     const apiKey = process.env.GEMINI_API_KEY;
@@ -728,9 +717,9 @@ app.post('/extract-screenshots', async (req, res) => {
       qualifyingFrames = await filterFramesWithRouteLines(sampledFrames, apiKey);
     }
 
-    // Fallback: if Gemini found nothing, use all frames (spread across timeline)
+    // Fallback: if Gemini found nothing, use evenly spaced frames
     if (qualifyingFrames.length === 0) {
-      console.warn('[screenshots] No qualifying frames found — using evenly spaced fallback frames');
+      console.warn('[screenshots] No qualifying frames found — using evenly spaced fallback');
       qualifyingFrames = sampledFrames;
     }
 
@@ -738,11 +727,11 @@ app.post('/extract-screenshots', async (req, res) => {
     const sections = thread.sections || [];
     const sectionsWithFrames = assignFramesToSections(qualifyingFrames, sections);
 
-    // ── Step 5: Re-extract chosen timestamps at full 1080p quality ─────────
+    // ── Step 5: Re-extract at full 1080p ──────────────────────────────────
     console.log('[screenshots] Re-extracting chosen frames at full resolution...');
     for (const section of sectionsWithFrames) {
       if (section.timestamp_sec != null) {
-        const hqPath = path.join('/tmp', `hq_frame_${section.number}_${Date.now()}.png`);
+        const hqPath = path.join('/tmp', `hq_frame_${section.number}.png`);
         finalFramePaths.push(hqPath);
         try {
           await upscaleFrame(tmpVideo, section.timestamp_sec, hqPath);
@@ -763,13 +752,11 @@ app.post('/extract-screenshots', async (req, res) => {
     );
     await new Promise(r => setTimeout(r, 500));
 
-    // ── Step 7: Send each section tweet + its screenshot to Discord ────────
+    // ── Step 7: Send each section + screenshot ────────────────────────────
     for (const section of sectionsWithFrames) {
       const framePath = section.hqFramePath || null;
       const hasFrame = framePath && fs.existsSync(framePath);
-
-      console.log(`[screenshots] Sending section ${section.number} to Discord (frame: ${hasFrame ? section.timestamp_sec + 's' : 'none'})`);
-
+      console.log(`[screenshots] Sending section ${section.number} (frame: ${hasFrame ? section.timestamp_sec + 's' : 'none'})`);
       await sendDiscordMessage(channelId, section.content, hasFrame ? framePath : null, botToken);
       await new Promise(r => setTimeout(r, 500));
     }
@@ -778,7 +765,7 @@ app.post('/extract-screenshots', async (req, res) => {
     await sendDiscordMessage(channelId, thread.cta, null, botToken);
     await new Promise(r => setTimeout(r, 500));
 
-    // ── Step 9: Send approval buttons via ClickUp bot ─────────────────────
+    // ── Step 9: Send approval buttons ─────────────────────────────────────
     if (discordBotUrl && sanitizedDraft) {
       const updatedThreadData = JSON.stringify({
         hook: thread.hook,
@@ -807,12 +794,7 @@ app.post('/extract-screenshots', async (req, res) => {
       await sendDiscordMessage(channelId, `❌ Failed to generate thread preview: ${err.message}`, null, botToken);
     } catch (e) {}
   } finally {
-    // ── Cleanup: delete all temp files ────────────────────────────────────
-    const allTempFiles = [
-      tmpVideo,
-      ...sampledFrames.map(f => f.path),
-      ...finalFramePaths,
-    ];
+    const allTempFiles = [tmpVideo, ...sampledFrames.map(f => f.path), ...finalFramePaths];
     allTempFiles.forEach(f => {
       try { if (f && fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
     });
