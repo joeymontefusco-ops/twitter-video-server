@@ -272,22 +272,25 @@ async function scoreFrameForSection(framePath, sectionTitle, sectionContent, api
   const imageBuffer = fs.readFileSync(framePath);
   const base64Image = imageBuffer.toString('base64');
 
-  const prompt = `You are analyzing Madden NFL gameplay screenshots.
+  const prompt = `You are a strict Madden NFL frame classifier.
 
 SECTION CONTEXT:
 Title: "${sectionTitle}"
 Content: "${sectionContent}"
 
 I am showing you 3 images:
-1. DEFENSE REFERENCE — a perfect defense screenshot (coverage zone arcs, DEEP ZONE/CURL FLAT labels on field, SHOW PLAY panel on LEFT)
-2. OFFENSE REFERENCE — a perfect offense screenshot (yellow/red route lines on field, SHOW PLAY panel on RIGHT)
+1. DEFENSE REFERENCE — defense screenshot: curved zone arcs across entire field, text labels (DEEP ZONE, CURL FLAT, HOOK CURL, CLOUD FLAT), SHOW PLAY panel on LEFT side
+2. OFFENSE REFERENCE — offense screenshot: straight/angled route arrows extending from receivers, yellow/red dominant colors, SHOW PLAY panel on RIGHT side
 3. CANDIDATE FRAME — the frame to evaluate
 
-Step 1: Based on the section title and content, decide if this section is about OFFENSE or DEFENSE.
-Step 2: Compare the CANDIDATE FRAME to the matching reference (offense or defense).
-Step 3: Answer ONLY "yes" if the candidate matches the expected type, "no" if it does not.
+Rules:
+- First determine: is this section about OFFENSE or DEFENSE based on the title and content?
+- OFFENSE sections: candidate must show route arrows on field similar to OFFENSE REFERENCE. Reject if it shows zone arcs or no routes.
+- DEFENSE sections: candidate must show coverage zone arcs similar to DEFENSE REFERENCE. Reject if it shows route arrows or no zones.
+- Reject ANY frame that is a menu, live play, face cam only, or has no overlays on the field.
+- Be STRICT. Only answer "yes" if the candidate clearly matches the expected type.
 
-Answer only yes or no:`;
+Answer ONLY "yes" or "no":`;
 
   const models = ['gemini-2.5-flash', 'gemini-2.0-flash-001', 'gemini-2.0-flash', 'gemini-2.5-flash-lite'];
 
@@ -791,15 +794,35 @@ app.post('/extract-screenshots', async (req, res) => {
     if (apiKey && sections.length > 0) {
       const sectionResults = await scoreFramesForSections(poolFrames, sections, apiKey);
 
-      sectionsWithFrames = sections.map(section => {
+      // Pick best frame per section — spread across timeline, no duplicates
+      const usedTimestamps = new Set();
+      const totalDuration = poolFrames[poolFrames.length - 1]?.timestamp || 600;
+      const sectionCount = sections.length;
+
+      sectionsWithFrames = sections.map((section, index) => {
         const matches = sectionResults[section.number] || [];
-        if (matches.length > 0) {
-          // Pick middle frame from matches
-          const pick = matches[Math.floor(matches.length / 2)];
-          console.log(`[assign] Section ${section.number}: frame at ${pick.timestamp}s`);
+        const zoneStart = (totalDuration / sectionCount) * index;
+        const zoneEnd = (totalDuration / sectionCount) * (index + 1);
+        const zoneCenter = (zoneStart + zoneEnd) / 2;
+
+        // Filter: matches in this section's zone that haven't been used
+        const zoneMatches = matches.filter(
+          f => f.timestamp >= zoneStart && f.timestamp < zoneEnd && !usedTimestamps.has(f.timestamp)
+        );
+        // Fallback: any unused match closest to zone center
+        const unusedMatches = matches.filter(f => !usedTimestamps.has(f.timestamp));
+        const candidates = zoneMatches.length > 0 ? zoneMatches : unusedMatches;
+
+        let pick = null;
+        if (candidates.length > 0) {
+          // Pick the candidate closest to zone center
+          pick = candidates.reduce((best, f) =>
+            Math.abs(f.timestamp - zoneCenter) < Math.abs(best.timestamp - zoneCenter) ? f : best
+          );
+          usedTimestamps.add(pick.timestamp);
+          console.log(`[assign] Section ${section.number}: frame at ${pick.timestamp}s (zone ${Math.floor(zoneStart)}-${Math.floor(zoneEnd)}s)`);
           return { ...section, bestFramePath: pick.path, timestamp_sec: pick.timestamp };
         } else {
-          // Fallback: use timeline zone assignment from all pool frames
           console.warn(`[assign] Section ${section.number}: no matches, using zone fallback`);
           return { ...section, bestFramePath: null, timestamp_sec: null };
         }
