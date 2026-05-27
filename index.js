@@ -272,11 +272,20 @@ async function scoreFrameForSection(framePath, sectionTitle, sectionContent, api
   const imageBuffer = fs.readFileSync(framePath);
   const base64Image = imageBuffer.toString('base64');
 
+  // Pre-classify offense/defense using keywords — avoids Gemini ambiguity
+  const offenseKeywords = ['route', 'curl', 'slant', 'cross', 'mesh', 'triangle', 'spacing', 'receiver', 'WR', 'TE', 'flat', 'stem', 'swirl', 'streak', 'post', 'corner', 'out', 'drag', 'comeback', 'attack', 'sideline', 'pass', 'throw', 'read', 'QB', 'motion', 'RPO', 'screen', 'combo', 'concept', 'play action'];
+  const defenseKeywords = ['coverage', 'zone', 'man', 'press', 'bracket', 'double', 'safety', 'CB', 'cornerback', 'linebacker', 'blitz', 'disguise', 'Cover 2', 'Cover 3', 'Cover 4', 'nickel', 'dime', 'prevent'];
+
+  const combined = (sectionTitle + ' ' + sectionContent).toLowerCase();
+  const offenseScore = offenseKeywords.filter(k => combined.includes(k.toLowerCase())).length;
+  const defenseScore = defenseKeywords.filter(k => combined.includes(k.toLowerCase())).length;
+
+  // Default to OFFENSE if ambiguous (most Madden content is offensive)
+  const sectionType = defenseScore > offenseScore ? 'DEFENSE' : 'OFFENSE';
+
   const prompt = `You are a strict Madden NFL frame classifier.
 
-SECTION CONTEXT:
-Title: "${sectionTitle}"
-Content: "${sectionContent}"
+This section is about: ${sectionType}
 
 I am showing you 3 images:
 1. DEFENSE REFERENCE — defense screenshot: curved zone arcs across entire field, text labels (DEEP ZONE, CURL FLAT, HOOK CURL, CLOUD FLAT), SHOW PLAY panel on LEFT side
@@ -284,11 +293,11 @@ I am showing you 3 images:
 3. CANDIDATE FRAME — the frame to evaluate
 
 Rules:
-- First determine: is this section about OFFENSE or DEFENSE based on the title and content?
-- OFFENSE sections: candidate must show route arrows on field similar to OFFENSE REFERENCE. Reject if it shows zone arcs or no routes.
-- DEFENSE sections: candidate must show coverage zone arcs similar to DEFENSE REFERENCE. Reject if it shows route arrows or no zones.
-- Reject ANY frame that is a menu, live play, face cam only, or has no overlays on the field.
-- Be STRICT. Only answer "yes" if the candidate clearly matches the expected type.
+${sectionType === 'OFFENSE' ?
+  '- OFFENSE: candidate must show route arrows on field similar to OFFENSE REFERENCE. Reject if it shows zone arcs, menus, live play, or no overlays.' :
+  '- DEFENSE: candidate must show coverage zone arcs similar to DEFENSE REFERENCE. Reject if it shows route arrows, menus, live play, or no overlays.'
+}
+- Be STRICT. Only "yes" if clearly matching.
 
 Answer ONLY "yes" or "no":`;
 
