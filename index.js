@@ -1197,7 +1197,10 @@ app.post('/submit-to-opusclip', async (req, res) => {
     console.log('[opusclip-submit] Uploading video to OpusClip...');
     const fileBuffer = fs.readFileSync(tmpVideo);
     await axios.put(uploadUrl, fileBuffer, {
-      headers: { 'Content-Type': 'video/mp4' },
+      headers: {
+        'Content-Type': 'video/mp4',
+        'Content-Length': fileSize.toString(),
+      },
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
       timeout: 600000,
