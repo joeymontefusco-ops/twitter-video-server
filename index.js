@@ -1140,6 +1140,116 @@ app.post('/opusclip-webhook', async (req, res) => {
   }
 });
 
+// ─── /submit-to-opusclip ──────────────────────────────────────────────────
+// Downloads video from Drive, uploads to OpusClip, creates clip project
+// Returns projectId for tracking
+app.post('/submit-to-opusclip', async (req, res) => {
+  const { driveFileId, driveUrl, hookText, n8nWebhookUrl } = req.body;
+
+  if (!driveFileId || !driveUrl) {
+    return res.status(400).json({ error: 'Missing driveFileId or driveUrl' });
+  }
+
+  const apiKey = process.env.OPUSCLIP_API_KEY;
+  if (!apiKey) return res.status(500).json({ error: 'OPUSCLIP_API_KEY not set' });
+
+  res.json({ success: true, message: 'Submitting to OpusClip...' });
+
+  const tmpVideo = path.join('/tmp', `opus_${Date.now()}.mp4`);
+
+  try {
+    // ── Step 1: Download video from Drive ──────────────────────────────────
+    console.log(`[opusclip-submit] Downloading video ${driveFileId}...`);
+    const dlRes = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
+    const writer = fs.createWriteStream(tmpVideo);
+    await new Promise((resolve, reject) => {
+      dlRes.data.pipe(writer);
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    const fileSize = fs.statSync(tmpVideo).size;
+    console.log(`[opusclip-submit] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
+
+    // ── Step 2: Get upload link from OpusClip ─────────────────────────────
+    console.log('[opusclip-submit] Getting upload link...');
+    const uploadLinkRes = await axios.post(
+      'https://api.opus.pro/api/upload-links',
+      { fileName: `video_${driveFileId}.mp4`, fileSize },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const uploadUrl = uploadLinkRes.data?.url || uploadLinkRes.data?.uploadUrl;
+    const uploadId = uploadLinkRes.data?.uploadId || uploadLinkRes.data?.id;
+
+    if (!uploadUrl || !uploadId) {
+      throw new Error('No upload URL or uploadId from OpusClip');
+    }
+
+    console.log(`[opusclip-submit] Got uploadId: ${uploadId}`);
+
+    // ── Step 3: Upload video to OpusClip ──────────────────────────────────
+    console.log('[opusclip-submit] Uploading video to OpusClip...');
+    const fileBuffer = fs.readFileSync(tmpVideo);
+    await axios.put(uploadUrl, fileBuffer, {
+      headers: { 'Content-Type': 'video/mp4' },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+      timeout: 600000,
+    });
+
+    console.log('[opusclip-submit] Upload complete');
+
+    // ── Step 4: Create clip project ───────────────────────────────────────
+    console.log('[opusclip-submit] Creating clip project...');
+    const projectRes = await axios.post(
+      'https://api.opus.pro/api/clip-projects',
+      {
+        videoUrl: uploadId,
+        renderPref: { layoutAspectRatio: 'four_five' },
+        curationPref: {
+          clipDurations: [[30, 90]],
+          genre: 'Auto',
+        },
+        conclusionActions: [{
+          type: 'WEBHOOK',
+          url: `https://twitter-video-server-production-d0c4.up.railway.app/opusclip-webhook`,
+        }],
+      },
+      {
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const projectId = projectRes.data?.id || projectRes.data?.projectId;
+    console.log(`[opusclip-submit] Project created: ${projectId}`);
+
+    // ── Step 5: Notify n8n with projectId so it can update Google Sheets ──
+    if (n8nWebhookUrl && projectId) {
+      await axios.post(n8nWebhookUrl, {
+        projectId,
+        driveFileId,
+        hookText: hookText || '',
+      });
+      console.log('[opusclip-submit] Notified n8n with projectId');
+    }
+
+  } catch (err) {
+    console.error('[opusclip-submit] Error:', err.response?.data || err.message);
+  } finally {
+    try { if (fs.existsSync(tmpVideo)) fs.unlinkSync(tmpVideo); } catch (e) {}
+    console.log('[opusclip-submit] Temp file cleaned up');
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok', tokenValid: !!hypefuryToken && Date.now() < tokenExpiry }));
 
 app.listen(PORT, () => {
