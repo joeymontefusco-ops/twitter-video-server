@@ -1200,6 +1200,7 @@ app.post('/submit-to-opusclip', async (req, res) => {
       headers: {
         'Content-Type': 'video/mp4',
         'Content-Length': fileSize.toString(),
+        'x-goog-resumable': 'start',
       },
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
