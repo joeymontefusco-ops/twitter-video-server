@@ -1193,19 +1193,51 @@ app.post('/submit-to-opusclip', async (req, res) => {
 
     console.log(`[opusclip-submit] Got uploadId: ${uploadId}`);
 
-    // ── Step 3: Upload video to OpusClip ──────────────────────────────────
+    // ── Step 3: Upload video to OpusClip (GCS resumable chunked upload) ───
     console.log('[opusclip-submit] Uploading video to OpusClip...');
-    const fileBuffer = fs.readFileSync(tmpVideo);
-    await axios.put(uploadUrl, fileBuffer, {
+
+    // GCS resumable upload — initiate session first
+    const sessionRes = await axios.post(uploadUrl, '', {
       headers: {
         'Content-Type': 'video/mp4',
-        'Content-Length': fileSize.toString(),
+        'Content-Length': '0',
         'x-goog-resumable': 'start',
+        'X-Upload-Content-Type': 'video/mp4',
+        'X-Upload-Content-Length': fileSize.toString(),
       },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      timeout: 600000,
+      maxRedirects: 0,
+      validateStatus: s => s < 400,
     });
+
+    const sessionUri = sessionRes.headers['location'];
+    if (!sessionUri) throw new Error('No session URI from GCS resumable upload');
+
+    console.log('[opusclip-submit] Got session URI, uploading chunks...');
+
+    // Upload in 10MB chunks
+    const CHUNK_SIZE = 10 * 1024 * 1024;
+    const fileBuffer = fs.readFileSync(tmpVideo);
+    let offset = 0;
+
+    while (offset < fileSize) {
+      const chunk = fileBuffer.slice(offset, offset + CHUNK_SIZE);
+      const chunkEnd = Math.min(offset + CHUNK_SIZE, fileSize) - 1;
+
+      await axios.put(sessionUri, chunk, {
+        headers: {
+          'Content-Type': 'video/mp4',
+          'Content-Length': chunk.length.toString(),
+          'Content-Range': `bytes ${offset}-${chunkEnd}/${fileSize}`,
+        },
+        validateStatus: s => s < 500,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+        timeout: 120000,
+      });
+
+      offset += chunk.length;
+      console.log(`[opusclip-submit] Uploaded ${Math.min(offset, fileSize)}/${fileSize} bytes`);
+    }
 
     console.log('[opusclip-submit] Upload complete');
 
