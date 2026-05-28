@@ -980,6 +980,166 @@ app.post('/upload-and-reply', async (req, res) => {
   }
 });
 
+// ─── /quote-tweet-video ───────────────────────────────────────────────────
+// Like /upload-and-reply but accepts any direct video URL (not just Drive)
+// Used for OpusClip clips and full Drive video quote tweets
+app.post('/quote-tweet-video', async (req, res) => {
+  const {
+    videoUrl,
+    replyToTweetId,
+    replyText,
+    consumerKey,
+    consumerSecret,
+    accessToken,
+    accessTokenSecret,
+  } = req.body;
+
+  if (!videoUrl || !replyToTweetId || !consumerKey || !consumerSecret || !accessToken || !accessTokenSecret) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  const credentials = { consumerKey, consumerSecret, accessToken, accessTokenSecret };
+  const tmpInput = path.join('/tmp', `qt_input_${Date.now()}.mp4`);
+  const tmpOutput = path.join('/tmp', `qt_output_${Date.now()}.mp4`);
+
+  try {
+    console.log(`[quote-tweet] Downloading video from ${videoUrl.substring(0, 60)}...`);
+    const response = await axios.get(videoUrl, {
+      responseType: 'stream',
+      timeout: 300000,
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+    });
+    const writer = fs.createWriteStream(tmpInput);
+    await new Promise((resolve, reject) => {
+      response.data.pipe(writer);
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    const fileSize = fs.statSync(tmpInput).size;
+    console.log(`[quote-tweet] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
+
+    let uploadPath = tmpInput;
+
+    if (fileSize > MAX_SIZE_BYTES) {
+      console.log('[quote-tweet] File over 512MB, compressing...');
+      const targetBitrate = Math.floor((480 * 1024 * 1024 * 8) / 600);
+      execSync(`ffmpeg -i ${tmpInput} -b:v ${targetBitrate} -maxrate ${targetBitrate} -bufsize ${targetBitrate * 2} -vcodec libx264 -acodec aac -y ${tmpOutput}`);
+      uploadPath = tmpOutput;
+    }
+
+    const mediaId = await uploadToTwitter(uploadPath, credentials);
+    const tweet = await postQuoteTweet(replyText || '', mediaId, replyToTweetId, credentials);
+
+    console.log(`[quote-tweet] Posted successfully: ${tweet.data?.id}`);
+    res.json({ success: true, tweet_id: tweet.data?.id, media_id: mediaId });
+
+  } catch (err) {
+    console.error('[quote-tweet] Error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data || err.message });
+  } finally {
+    [tmpInput, tmpOutput].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
+  }
+});
+
+// ─── /get-latest-tweet ────────────────────────────────────────────────────
+// Fetches TMA's latest tweets and matches hook text to find tweet ID
+app.post('/get-latest-tweet', async (req, res) => {
+  const {
+    hookText,
+    consumerKey,
+    consumerSecret,
+    accessToken,
+    accessTokenSecret,
+    userId,
+  } = req.body;
+
+  if (!hookText || !consumerKey || !consumerSecret || !accessToken || !accessTokenSecret || !userId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
+
+  const credentials = { consumerKey, consumerSecret, accessToken, accessTokenSecret };
+
+  try {
+    console.log(`[get-tweet] Fetching latest tweets for user ${userId}...`);
+
+    const url = `https://api.twitter.com/2/users/${userId}/tweets`;
+    const params = { max_results: 10, 'tweet.fields': 'created_at,text' };
+    const queryString = new URLSearchParams(params).toString();
+    const fullUrl = `${url}?${queryString}`;
+
+    const oauthHeader = generateOAuthHeader('GET', url, params, credentials);
+    const response = await axios.get(fullUrl, {
+      headers: { Authorization: oauthHeader },
+    });
+
+    const tweets = response.data?.data || [];
+    console.log(`[get-tweet] Got ${tweets.length} tweets`);
+
+    // Match hook text — check if tweet contains first 50 chars of hook
+    const hookSnippet = hookText.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase().substring(0, 50);
+    const match = tweets.find(t => {
+      const tweetText = t.text.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
+      return tweetText.includes(hookSnippet);
+    });
+
+    if (match) {
+      console.log(`[get-tweet] Found matching tweet: ${match.id}`);
+      res.json({ success: true, tweet_id: match.id, tweet_text: match.text });
+    } else {
+      console.log('[get-tweet] No matching tweet found yet');
+      res.json({ success: false, message: 'No matching tweet found', tweets: tweets.map(t => t.text.substring(0, 50)) });
+    }
+
+  } catch (err) {
+    console.error('[get-tweet] Error:', err.response?.data || err.message);
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
+
+// ─── /opusclip-webhook ────────────────────────────────────────────────────
+// Receives webhook from OpusClip when clips are ready
+// Stores clip data and notifies n8n via webhook URL
+app.post('/opusclip-webhook', async (req, res) => {
+  const payload = req.body;
+  console.log('[opusclip] Webhook received:', JSON.stringify(payload).substring(0, 200));
+
+  res.json({ success: true });
+
+  try {
+    // OpusClip sends project status + clips array when done
+    const status = payload?.status || payload?.data?.status;
+    const projectId = payload?.project_id || payload?.data?.project_id;
+    const clips = payload?.clips || payload?.data?.clips || [];
+
+    if (status !== 'completed' && status !== 'done') {
+      console.log(`[opusclip] Project ${projectId} status: ${status} — waiting for completion`);
+      return;
+    }
+
+    console.log(`[opusclip] Project ${projectId} completed with ${clips.length} clips`);
+
+    // Forward to n8n webhook for Discord approval flow
+    const n8nWebhookUrl = process.env.N8N_OPUSCLIP_WEBHOOK_URL;
+    if (n8nWebhookUrl && clips.length > 0) {
+      await axios.post(n8nWebhookUrl, {
+        projectId,
+        clips: clips.slice(0, 3).map((clip, i) => ({
+          index: i + 1,
+          url: clip.stream_url || clip.download_url || clip.url,
+          duration: clip.duration,
+          score: clip.score,
+          thumbnail: clip.thumbnail_url,
+        })),
+      });
+      console.log(`[opusclip] Forwarded ${Math.min(clips.length, 3)} clips to n8n`);
+    }
+
+  } catch (err) {
+    console.error('[opusclip] Error processing webhook:', err.message);
+  }
+});
+
 app.get('/health', (req, res) => res.json({ status: 'ok', tokenValid: !!hypefuryToken && Date.now() < tokenExpiry }));
 
 app.listen(PORT, () => {
