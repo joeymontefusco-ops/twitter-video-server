@@ -1042,41 +1042,66 @@ app.post('/quote-tweet-video', async (req, res) => {
   }
 });
 
-// ─── /get-hypefury-post ───────────────────────────────────────────────────
-// Fetches a Hypefury post to check if published and get tweetIds
-app.post('/get-hypefury-post', async (req, res) => {
-  const { postId } = req.body;
-  if (!postId) return res.status(400).json({ error: 'Missing postId' });
+// ─── /get-latest-tweet-syndication ───────────────────────────────────────
+// Uses Twitter's public Syndication API (no auth needed, no credits)
+// Same API used by embedded Twitter widgets
+app.post('/get-latest-tweet', async (req, res) => {
+  console.log('[get-tweet] Body received:', JSON.stringify(req.body));
+  const { hookText, userId } = req.body;
 
-  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  if (!hookText || !userId) {
+    return res.status(400).json({ error: 'Missing required fields' });
+  }
 
   try {
-    const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+    console.log(`[get-tweet] Fetching timeline via Syndication API...`);
 
-    // Try Hypefury's queue endpoint which lists all posts
+    // Twitter's public syndication endpoint — no auth required
     const response = await axios.get(
-      `https://app.hypefury.com/api/queue?userId=${userId}`,
+      `https://syndication.twitter.com/srv/timeline-profile/screen-name/MaddenAcademy_`,
       {
         headers: {
-          'Authorization': `Bearer ${hypefuryToken}`,
-          'Content-Type': 'application/json',
-          'Origin': 'https://app.hypefury.com',
-          'Referer': 'https://app.hypefury.com/queue',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json',
         },
+        timeout: 15000,
       }
     );
 
-    console.log('[hypefury] Queue response keys:', JSON.stringify(Object.keys(response.data || {})));
-    console.log('[hypefury] Queue data sample:', JSON.stringify(response.data).substring(0, 800));
-    res.json({ success: true, data: response.data });
+    // Parse HTML response to extract tweet IDs
+    const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
+    console.log('[get-tweet] Response sample:', html.substring(0, 300));
+
+    // Extract tweet IDs from the HTML — they appear as data-tweet-id attributes
+    const tweetIdMatches = html.match(/data-tweet-id="(\d+)"/g) || [];
+    const tweetIds = tweetIdMatches.map(m => m.match(/\d+/)[0]);
+
+    // Also try to extract text snippets
+    const textMatches = html.match(/class="tweet-text"[^>]*>([^<]+)/g) || [];
+
+    console.log(`[get-tweet] Found ${tweetIds.length} tweet IDs`);
+
+    if (tweetIds.length === 0) {
+      return res.json({ success: false, message: 'No tweets found in syndication response' });
+    }
+
+    // Match hookText against tweet text if available
+    const hookSnippet = hookText.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase().substring(0, 50);
+
+    // Return most recent tweet ID as fallback
+    res.json({
+      success: true,
+      tweet_id: tweetIds[0],
+      all_ids: tweetIds.slice(0, 5),
+    });
 
   } catch (err) {
-    console.error('[hypefury] Error:', err.response?.status, JSON.stringify(err.response?.data || err.message));
+    console.error('[get-tweet] Error:', err.response?.status, err.message);
     res.status(500).json({ error: err.response?.data || err.message });
   }
 });
 
+// ─── /get-hypefury-post (kept for reference) ──────────────────────────────
 // ─── /get-latest-tweet ────────────────────────────────────────────────────
 // Fetches TMA's latest tweets and matches hook text to find tweet ID
 app.post('/get-latest-tweet', async (req, res) => {
