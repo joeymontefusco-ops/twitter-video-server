@@ -1108,26 +1108,48 @@ app.post('/opusclip-webhook', async (req, res) => {
   res.json({ success: true });
 
   try {
-    // OpusClip payload structure varies — try all known paths
-    const status = payload?.status || payload?.data?.status || payload?.state || payload?.data?.state;
-    const projectId = payload?.id || payload?.project_id || payload?.data?.id || payload?.data?.project_id;
-    const clips = payload?.clips || payload?.data?.clips || payload?.exportableClips || payload?.data?.exportableClips || [];
+    // OpusClip uses "stage" for status and clips are nested under exportableClips or similar
+    const stage = payload?.stage || payload?.data?.stage;
+    const projectId = payload?.id || payload?.data?.id;
+    const clips = payload?.clips || payload?.data?.clips || 
+                  payload?.exportableClips || payload?.data?.exportableClips ||
+                  payload?.highlightClips || payload?.data?.highlightClips || [];
 
-    console.log(`[opusclip] projectId: ${projectId}, status: ${status}, clips: ${clips.length}`);
+    console.log(`[opusclip] projectId: ${projectId}, stage: ${stage}, clips: ${clips.length}`);
+    console.log(`[opusclip] Full keys: ${Object.keys(payload).join(', ')}`);
 
-    if (!status || (status !== 'completed' && status !== 'done' && status !== 'success' && status !== 'COMPLETED' && status !== 'DONE')) {
-      console.log(`[opusclip] Project ${projectId} status: ${status} — waiting for completion`);
+    if (stage !== 'COMPLETE' && stage !== 'complete' && stage !== 'completed' && stage !== 'done') {
+      console.log(`[opusclip] Project ${projectId} stage: ${stage} — not complete yet`);
       return;
     }
 
-    console.log(`[opusclip] Project ${projectId} completed with ${clips.length} clips`);
+    // If stage is complete but no clips in payload, fetch them via API
+    let finalClips = clips;
+    if (finalClips.length === 0 && projectId) {
+      console.log(`[opusclip] Stage complete but no clips in payload — fetching via API...`);
+      const apiKey = process.env.OPUSCLIP_API_KEY;
+      try {
+        const clipsRes = await axios.get(
+          `https://api.opus.pro/api/clip-projects/${projectId}/clips`,
+          { headers: { Authorization: `Bearer ${apiKey}` } }
+        );
+        finalClips = clipsRes.data?.clips || clipsRes.data?.data || clipsRes.data || [];
+        console.log(`[opusclip] Fetched ${finalClips.length} clips via API`);
+        console.log(`[opusclip] Clips response keys: ${JSON.stringify(Object.keys(clipsRes.data || {}))}`);
+        console.log(`[opusclip] First clip sample: ${JSON.stringify(finalClips[0] || {}).substring(0, 300)}`);
+      } catch (e) {
+        console.error(`[opusclip] Failed to fetch clips:`, e.message);
+      }
+    }
+
+    console.log(`[opusclip] Project ${projectId} completed with ${finalClips.length} clips`);
 
     // Forward to n8n webhook for Discord approval flow
     const n8nWebhookUrl = process.env.N8N_OPUSCLIP_WEBHOOK_URL;
-    if (n8nWebhookUrl && clips.length > 0) {
+    if (n8nWebhookUrl && finalClips.length > 0) {
       await axios.post(n8nWebhookUrl, {
         projectId,
-        clips: clips.slice(0, 3).map((clip, i) => ({
+        clips: finalClips.slice(0, 3).map((clip, i) => ({
           index: i + 1,
           url: clip.stream_url || clip.download_url || clip.url,
           duration: clip.duration,
@@ -1135,7 +1157,7 @@ app.post('/opusclip-webhook', async (req, res) => {
           thumbnail: clip.thumbnail_url,
         })),
       });
-      console.log(`[opusclip] Forwarded ${Math.min(clips.length, 3)} clips to n8n`);
+      console.log(`[opusclip] Forwarded ${Math.min(finalClips.length, 3)} clips to n8n`);
     }
 
   } catch (err) {
