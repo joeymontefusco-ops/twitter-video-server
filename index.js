@@ -438,8 +438,9 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
 // ─── Upload image to Hypefury Firebase Storage ────────────────────────────
 async function uploadImageToHypefury(imagePath, jwtToken) {
   const imageId = uuidv4();
-  const fileName = `${imageId}.png`;
-  const thumbnailName = `thumbnail-${imageId}.png`;
+  const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+const fileName = `${userId}/${imageId}.png`;
+const thumbnailName = `${userId}/thumbnail-${imageId}.png`;
   const bucket = 'hypefury-896c7.appspot.com';
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
   const fileBuffer = fs.readFileSync(imagePath);
@@ -1351,6 +1352,28 @@ app.post('/submit-to-opusclip', async (req, res) => {
   } finally {
     try { if (fs.existsSync(tmpVideo)) fs.unlinkSync(tmpVideo); } catch (e) {}
     console.log('[opusclip-submit] Temp file cleaned up');
+  }
+});
+
+app.get('/test-twitter-auth', async (req, res) => {
+  const consumerKey = req.query.ck;
+  const consumerSecret = req.query.cs;
+  const accessToken = req.query.at;
+  const accessTokenSecret = req.query.ats;
+
+  const credentials = { consumerKey, consumerSecret, accessToken, accessTokenSecret };
+  
+  // Test with a simple GET to verify auth
+  const url = 'https://api.twitter.com/1.1/account/verify_credentials.json';
+  const oauthHeader = generateOAuthHeader('GET', url, {}, credentials);
+  
+  try {
+    const response = await axios.get(url, {
+      headers: { Authorization: oauthHeader }
+    });
+    res.json({ success: true, screen_name: response.data.screen_name });
+  } catch (err) {
+    res.json({ success: false, error: err.response?.data || err.message });
   }
 });
 
