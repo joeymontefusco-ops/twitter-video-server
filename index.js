@@ -1047,30 +1047,21 @@ app.post('/quote-tweet-video', async (req, res) => {
 app.post('/get-latest-tweet', async (req, res) => {
   const {
     hookText,
-    consumerKey,
-    consumerSecret,
-    accessToken,
-    accessTokenSecret,
+    bearerToken,
     userId,
   } = req.body;
 
-  if (!hookText || !consumerKey || !consumerSecret || !accessToken || !accessTokenSecret || !userId) {
+  if (!hookText || !bearerToken || !userId) {
     return res.status(400).json({ error: 'Missing required fields' });
   }
-
-  const credentials = { consumerKey, consumerSecret, accessToken, accessTokenSecret };
 
   try {
     console.log(`[get-tweet] Fetching latest tweets for user ${userId}...`);
 
-    const url = `https://api.twitter.com/2/users/${userId}/tweets`;
-    // Only include simple params in OAuth signature — tweet.fields dot notation breaks signing
-    const oauthParams = { max_results: '10' };
-    const fullUrl = `${url}?max_results=10&tweet.fields=created_at,text`;
+    const fullUrl = `https://api.twitter.com/2/users/${userId}/tweets?max_results=10&tweet.fields=created_at,text`;
 
-    const oauthHeader = generateOAuthHeader('GET', url, oauthParams, credentials);
     const response = await axios.get(fullUrl, {
-      headers: { Authorization: oauthHeader },
+      headers: { Authorization: `Bearer ${bearerToken}` },
     });
 
     const tweets = response.data?.data || [];
