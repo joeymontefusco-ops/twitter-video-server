@@ -1092,7 +1092,9 @@ app.post('/get-latest-tweet', async (req, res) => {
     }
 
   } catch (err) {
-    console.error('[get-tweet] Error:', err.response?.data || err.message);
+    console.error('[get-tweet] Error status:', err.response?.status);
+    console.error('[get-tweet] Error data:', JSON.stringify(err.response?.data));
+    console.error('[get-tweet] Error message:', err.message);
     res.status(500).json({ error: err.response?.data || err.message });
   }
 });
