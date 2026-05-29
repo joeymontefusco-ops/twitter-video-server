@@ -1064,11 +1064,11 @@ app.post('/get-latest-tweet', async (req, res) => {
     console.log(`[get-tweet] Fetching latest tweets for user ${userId}...`);
 
     const url = `https://api.twitter.com/2/users/${userId}/tweets`;
-    const params = { max_results: 10, 'tweet.fields': 'created_at,text' };
-    const queryString = new URLSearchParams(params).toString();
-    const fullUrl = `${url}?${queryString}`;
+    // Only include simple params in OAuth signature — tweet.fields dot notation breaks signing
+    const oauthParams = { max_results: '10' };
+    const fullUrl = `${url}?max_results=10&tweet.fields=created_at,text`;
 
-    const oauthHeader = generateOAuthHeader('GET', url, params, credentials);
+    const oauthHeader = generateOAuthHeader('GET', url, oauthParams, credentials);
     const response = await axios.get(fullUrl, {
       headers: { Authorization: oauthHeader },
     });
@@ -1139,6 +1139,8 @@ app.post('/opusclip-webhook', async (req, res) => {
         finalClips = clipsRes.data?.data || clipsRes.data?.clips || clipsRes.data || [];
         console.log(`[opusclip] Fetched ${finalClips.length} clips via API`);
         console.log(`[opusclip] First clip sample: ${JSON.stringify(finalClips[0] || {}).substring(0, 300)}`);
+        console.log(`[opusclip] First clip ALL keys: ${JSON.stringify(Object.keys(finalClips[0] || {}))}`);
+        console.log(`[opusclip] First clip full: ${JSON.stringify(finalClips[0] || {})}`);
       } catch (e) {
         console.error(`[opusclip] Failed to fetch clips:`, e.message);
       }
