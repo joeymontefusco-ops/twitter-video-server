@@ -1151,12 +1151,13 @@ app.post('/opusclip-webhook', async (req, res) => {
     if (n8nWebhookUrl && finalClips.length > 0) {
       await axios.post(n8nWebhookUrl, {
         projectId,
+        driveFileId: payload?.driveFileId || '',
         clips: finalClips.slice(0, 3).map((clip, i) => ({
           index: i + 1,
-          url: clip.stream_url || clip.download_url || clip.url,
-          duration: clip.duration,
-          score: clip.score,
-          thumbnail: clip.thumbnail_url,
+          url: clip.uriForPreview || clip.stream_url || clip.download_url || clip.url,
+          duration: clip.duration || clip.clipDuration,
+          score: clip.viralScore || clip.score,
+          thumbnail: clip.thumbnailUrl || clip.thumbnail_url,
         })),
       });
       console.log(`[opusclip] Forwarded ${Math.min(finalClips.length, 3)} clips to n8n`);
