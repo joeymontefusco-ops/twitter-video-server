@@ -1043,7 +1043,7 @@ app.post('/quote-tweet-video', async (req, res) => {
 });
 
 // ─── /get-hypefury-post ───────────────────────────────────────────────────
-// Fetches a Hypefury post by postId to check if published and get tweetIds
+// Fetches a Hypefury post via Firestore REST API to check tweetIds
 app.post('/get-hypefury-post', async (req, res) => {
   const { postId } = req.body;
   if (!postId) return res.status(400).json({ error: 'Missing postId' });
@@ -1051,24 +1051,20 @@ app.post('/get-hypefury-post', async (req, res) => {
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
 
   try {
-    const response = await axios.get(
-      `https://app.hypefury.com/api/posts/${postId}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${hypefuryToken}`,
-          'Content-Type': 'application/json',
-          'Origin': 'https://app.hypefury.com',
-          'Referer': 'https://app.hypefury.com/queue',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        },
-      }
-    );
+    // Hypefury uses Firestore — query via REST API using Firebase JWT token
+    const firestoreUrl = `https://firestore.googleapis.com/v1/projects/hypefury-896c7/databases/(default)/documents/posts/${postId}`;
 
-    console.log('[hypefury] Post data:', JSON.stringify(response.data).substring(0, 500));
+    const response = await axios.get(firestoreUrl, {
+      headers: {
+        'Authorization': `Bearer ${hypefuryToken}`,
+      },
+    });
+
+    console.log('[hypefury] Firestore post data:', JSON.stringify(response.data).substring(0, 800));
     res.json({ success: true, data: response.data });
 
   } catch (err) {
-    console.error('[hypefury] Error:', err.response?.data || err.message);
+    console.error('[hypefury] Error:', err.response?.status, JSON.stringify(err.response?.data || err.message));
     res.status(500).json({ error: err.response?.data || err.message });
   }
 });
