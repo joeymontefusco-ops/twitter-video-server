@@ -83,7 +83,7 @@ async function uploadToTwitter(filePath, credentials) {
     media_category: 'tweet_video',
   };
 
-  const initOAuth = generateOAuthHeader('POST', initUrl, initParams, credentials);
+  const initOAuth = generateOAuthHeader('POST', initUrl, {}, credentials);
   const initForm = new FormData();
   Object.entries(initParams).forEach(([k, v]) => initForm.append(k, v));
 
