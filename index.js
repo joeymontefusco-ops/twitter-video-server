@@ -625,7 +625,7 @@ app.post('/post-thread', async (req, res) => {
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
       const media = index === 0
-        ? allSectionMedia
+  ? allSectionMedia.slice(0, 4) // hook gets max 4 images
         : section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
       return {
         status: text,
