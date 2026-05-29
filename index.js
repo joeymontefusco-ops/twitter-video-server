@@ -1056,11 +1056,11 @@ app.post('/get-latest-tweet', async (req, res) => {
   try {
     // Try multiple Nitter instances for reliability
     const nitterInstances = [
-      'https://nitter.poast.org',
-      'https://nitter.privacydev.net',
-      'https://nitter.1d4.us',
-      'https://nitter.kavin.rocks',
-    ];
+  'https://nitter.privacyredirect.com',
+  'https://nitter.poast.org',
+  'https://nitter.privacydev.net',
+  'https://nitter.1d4.us',
+];
 
     let xml = null;
     for (const instance of nitterInstances) {
@@ -1125,55 +1125,6 @@ app.post('/get-latest-tweet', async (req, res) => {
 
   } catch (err) {
     console.error('[get-tweet] Error:', err.response?.status, err.message);
-    res.status(500).json({ error: err.response?.data || err.message });
-  }
-});
-
-// ─── /get-hypefury-post (kept for reference) ──────────────────────────────
-// ─── /get-latest-tweet ────────────────────────────────────────────────────
-// Fetches TMA's latest tweets and matches hook text to find tweet ID
-app.post('/get-latest-tweet', async (req, res) => {
-  const {
-    hookText,
-    bearerToken,
-    userId,
-  } = req.body;
-
-  if (!hookText || !bearerToken || !userId) {
-    return res.status(400).json({ error: 'Missing required fields' });
-  }
-
-  try {
-    console.log(`[get-tweet] Fetching latest tweets for user ${userId}...`);
-
-    const fullUrl = `https://api.twitter.com/2/users/${userId}/tweets?max_results=10&tweet.fields=created_at,text`;
-
-    const response = await axios.get(fullUrl, {
-      headers: { Authorization: `Bearer ${bearerToken}` },
-    });
-
-    const tweets = response.data?.data || [];
-    console.log(`[get-tweet] Got ${tweets.length} tweets`);
-
-    // Match hook text — check if tweet contains first 50 chars of hook
-    const hookSnippet = hookText.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase().substring(0, 50);
-    const match = tweets.find(t => {
-      const tweetText = t.text.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
-      return tweetText.includes(hookSnippet);
-    });
-
-    if (match) {
-      console.log(`[get-tweet] Found matching tweet: ${match.id}`);
-      res.json({ success: true, tweet_id: match.id, tweet_text: match.text });
-    } else {
-      console.log('[get-tweet] No matching tweet found yet');
-      res.json({ success: false, message: 'No matching tweet found', tweets: tweets.map(t => t.text.substring(0, 50)) });
-    }
-
-  } catch (err) {
-    console.error('[get-tweet] Error status:', err.response?.status);
-    console.error('[get-tweet] Error data:', JSON.stringify(err.response?.data));
-    console.error('[get-tweet] Error message:', err.message);
     res.status(500).json({ error: err.response?.data || err.message });
   }
 });
