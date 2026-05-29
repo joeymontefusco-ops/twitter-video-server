@@ -1130,12 +1130,14 @@ app.post('/opusclip-webhook', async (req, res) => {
       const apiKey = process.env.OPUSCLIP_API_KEY;
       try {
         const clipsRes = await axios.get(
-          `https://api.opus.pro/api/clip-projects/${projectId}/clips`,
-          { headers: { Authorization: `Bearer ${apiKey}` } }
+          `https://api.opus.pro/api/exportable-clips?q=findByProjectId&projectId=${projectId}`,
+          { headers: { 
+            Authorization: `Bearer ${apiKey}`,
+            'x-opus-org-id': payload?.orgId || '',
+          }}
         );
-        finalClips = clipsRes.data?.clips || clipsRes.data?.data || clipsRes.data || [];
+        finalClips = clipsRes.data?.data || clipsRes.data?.clips || clipsRes.data || [];
         console.log(`[opusclip] Fetched ${finalClips.length} clips via API`);
-        console.log(`[opusclip] Clips response keys: ${JSON.stringify(Object.keys(clipsRes.data || {}))}`);
         console.log(`[opusclip] First clip sample: ${JSON.stringify(finalClips[0] || {}).substring(0, 300)}`);
       } catch (e) {
         console.error(`[opusclip] Failed to fetch clips:`, e.message);
