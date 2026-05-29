@@ -999,6 +999,12 @@ app.post('/quote-tweet-video', async (req, res) => {
   }
 
   const credentials = { consumerKey, consumerSecret, accessToken, accessTokenSecret };
+  console.log('[quote-tweet] Credentials check:', {
+  consumerKey: consumerKey?.substring(0, 8) + '...',
+  consumerSecret: consumerSecret?.substring(0, 8) + '...',
+  accessToken: accessToken?.substring(0, 8) + '...',
+  accessTokenSecret: accessTokenSecret?.substring(0, 8) + '...',
+});
   const tmpInput = path.join('/tmp', `qt_input_${Date.now()}.mp4`);
   const tmpOutput = path.join('/tmp', `qt_output_${Date.now()}.mp4`);
 
