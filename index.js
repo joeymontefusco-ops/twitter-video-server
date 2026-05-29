@@ -1054,45 +1054,73 @@ app.post('/get-latest-tweet', async (req, res) => {
   }
 
   try {
-    console.log(`[get-tweet] Fetching timeline via Syndication API...`);
+    // Try multiple Nitter instances for reliability
+    const nitterInstances = [
+      'https://nitter.poast.org',
+      'https://nitter.privacydev.net',
+      'https://nitter.1d4.us',
+      'https://nitter.kavin.rocks',
+    ];
 
-    // Twitter's public syndication endpoint — no auth required
-    const response = await axios.get(
-      `https://syndication.twitter.com/srv/timeline-profile/screen-name/MaddenAcademy_`,
-      {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json',
-        },
-        timeout: 15000,
+    let xml = null;
+    for (const instance of nitterInstances) {
+      try {
+        console.log(`[get-tweet] Trying Nitter RSS: ${instance}/MaddenAcademy_/rss`);
+        const response = await axios.get(`${instance}/MaddenAcademy_/rss`, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            'Accept': 'application/rss+xml, application/xml, text/xml',
+          },
+          timeout: 10000,
+        });
+        xml = response.data;
+        console.log(`[get-tweet] Got RSS from ${instance}`);
+        break;
+      } catch (e) {
+        console.log(`[get-tweet] ${instance} failed: ${e.response?.status || e.message}`);
       }
-    );
-
-    // Parse HTML response to extract tweet IDs
-    const html = typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
-    console.log('[get-tweet] Response sample:', html.substring(0, 300));
-
-    // Extract tweet IDs from the HTML — they appear as data-tweet-id attributes
-    const tweetIdMatches = html.match(/data-tweet-id="(\d+)"/g) || [];
-    const tweetIds = tweetIdMatches.map(m => m.match(/\d+/)[0]);
-
-    // Also try to extract text snippets
-    const textMatches = html.match(/class="tweet-text"[^>]*>([^<]+)/g) || [];
-
-    console.log(`[get-tweet] Found ${tweetIds.length} tweet IDs`);
-
-    if (tweetIds.length === 0) {
-      return res.json({ success: false, message: 'No tweets found in syndication response' });
     }
 
-    // Match hookText against tweet text if available
-    const hookSnippet = hookText.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase().substring(0, 50);
+    if (!xml) {
+      return res.json({ success: false, message: 'All Nitter instances failed' });
+    }
 
-    // Return most recent tweet ID as fallback
+    console.log('[get-tweet] RSS sample:', xml.substring(0, 300));
+
+    // Extract tweet IDs from RSS — format: https://nitter.../MaddenAcademy_/status/TWEET_ID#m
+    const tweetIdMatches = xml.match(/status\/([0-9]+)#m/g) || [];
+    const tweetIds = [...new Set(tweetIdMatches.map(m => m.match(/([0-9]+)#m/)[1]))];
+
+    // Extract titles for matching
+    const titleMatches = xml.match(/<title><!\[CDATA\[([^\]]+)\]\]><\/title>/g) || [];
+    const titles = titleMatches.slice(1).map(t => t.replace(/<title><!\[CDATA\[/, '').replace(/\]\]><\/title>/, ''));
+
+    console.log(`[get-tweet] Found ${tweetIds.length} tweet IDs`);
+    console.log(`[get-tweet] Titles:`, titles.slice(0, 3));
+
+    if (tweetIds.length === 0) {
+      return res.json({ success: false, message: 'No tweet IDs found in RSS' });
+    }
+
+    // Try to match hookText
+    const hookSnippet = hookText.replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase().substring(0, 30);
+    let matchedId = null;
+
+    for (let i = 0; i < titles.length; i++) {
+      const titleClean = titles[i].replace(/[^a-zA-Z0-9 ]/g, '').toLowerCase();
+      if (titleClean.includes(hookSnippet)) {
+        matchedId = tweetIds[i];
+        console.log(`[get-tweet] Matched tweet: ${matchedId} — "${titles[i].substring(0, 50)}"`);
+        break;
+      }
+    }
+
     res.json({
       success: true,
-      tweet_id: tweetIds[0],
+      tweet_id: matchedId || tweetIds[0],
+      matched: !!matchedId,
       all_ids: tweetIds.slice(0, 5),
+      titles: titles.slice(0, 5),
     });
 
   } catch (err) {
