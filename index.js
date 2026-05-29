@@ -1102,17 +1102,20 @@ app.post('/get-latest-tweet', async (req, res) => {
 // Stores clip data and notifies n8n via webhook URL
 app.post('/opusclip-webhook', async (req, res) => {
   const payload = req.body;
-  console.log('[opusclip] Webhook received:', JSON.stringify(payload).substring(0, 200));
+  // Log full payload to understand structure
+  console.log('[opusclip] Full payload:', JSON.stringify(payload, null, 2).substring(0, 1000));
 
   res.json({ success: true });
 
   try {
-    // OpusClip sends project status + clips array when done
-    const status = payload?.status || payload?.data?.status;
-    const projectId = payload?.project_id || payload?.data?.project_id;
-    const clips = payload?.clips || payload?.data?.clips || [];
+    // OpusClip payload structure varies — try all known paths
+    const status = payload?.status || payload?.data?.status || payload?.state || payload?.data?.state;
+    const projectId = payload?.id || payload?.project_id || payload?.data?.id || payload?.data?.project_id;
+    const clips = payload?.clips || payload?.data?.clips || payload?.exportableClips || payload?.data?.exportableClips || [];
 
-    if (status !== 'completed' && status !== 'done') {
+    console.log(`[opusclip] projectId: ${projectId}, status: ${status}, clips: ${clips.length}`);
+
+    if (!status || (status !== 'completed' && status !== 'done' && status !== 'success' && status !== 'COMPLETED' && status !== 'DONE')) {
       console.log(`[opusclip] Project ${projectId} status: ${status} — waiting for completion`);
       return;
     }
