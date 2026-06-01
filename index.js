@@ -1055,7 +1055,8 @@ app.post('/upload-and-reply', async (req, res) => {
     }
 
     const mediaId = await uploadToTwitter(uploadPath, credentials);
-    const tweet = await postQuoteTweet(replyText || '', mediaId, replyToTweetId, credentials);
+console.log('[quote-tweet] Media uploaded OK:', mediaId);   // ← add this
+const tweet = await postQuoteTweet(replyText || '', mediaId, replyToTweetId, credentials);
 
     res.json({ success: true, tweet_id: tweet.data?.id, media_id: mediaId });
 
