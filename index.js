@@ -361,6 +361,88 @@ async function scoreFramesForSections(frames, sections, apiKey) {
   return sectionResults;
 }
 
+// ─── Cap frames sent to Gemini, spread evenly across timeline ─────────────
+function capFrames(frames, maxTotal = 30, zones = 10) {
+  if (frames.length <= maxTotal) return frames;
+  const dur = frames[frames.length - 1].timestamp || 1;
+  const perZone = Math.ceil(maxTotal / zones);
+  const kept = [];
+  for (let z = 0; z < zones; z++) {
+    const start = (dur / zones) * z;
+    const end = (dur / zones) * (z + 1);
+    const inZone = frames.filter(f => f.timestamp >= start && f.timestamp < end);
+    if (inZone.length === 0) continue;
+    const step = Math.max(1, Math.floor(inZone.length / perZone));
+    for (let k = 0; k < inZone.length && kept.length < maxTotal; k += step) {
+      kept.push(inZone[k]);
+    }
+  }
+  return kept.length > 0 ? kept : frames.slice(0, maxTotal);
+}
+
+// ─── Classify frames in batches: one Gemini call per batch, not per section ─
+async function classifyFramesBatched(frames, apiKey, batchSize = 4) {
+  const results = [];
+  const models = ['gemini-2.5-flash-lite', 'gemini-2.0-flash-001', 'gemini-2.5-flash'];
+
+  for (let i = 0; i < frames.length; i += batchSize) {
+    const batch = frames.slice(i, i + batchSize);
+    const parts = [
+      { text: 'REFERENCE — DEFENSE (curved coverage zone arcs across field, SHOW PLAY panel on LEFT):' },
+      { inline_data: { mime_type: 'image/png', data: REF_DEFENSE_B64 } },
+      { text: 'REFERENCE — OFFENSE (straight/angled route arrows from receivers, panel on RIGHT):' },
+      { inline_data: { mime_type: 'image/png', data: REF_OFFENSE_B64 } },
+    ];
+    batch.forEach((f, idx) => {
+      try {
+        const b64 = fs.readFileSync(f.path).toString('base64');
+        parts.push({ text: `Candidate ${idx + 1}:` });
+        parts.push({ inline_data: { mime_type: 'image/png', data: b64 } });
+      } catch (e) {
+        parts.push({ text: `Candidate ${idx + 1}: [unreadable]` });
+      }
+    });
+    parts.push({ text: `Classify EACH candidate as exactly one of:
+"offense" = route arrows like the OFFENSE reference
+"defense" = coverage zone arcs like the DEFENSE reference
+"none" = live gameplay, menus, replays, or no play-art overlay
+Be strict. Return ONLY a JSON array of lowercase strings, one per candidate in order. Example: ["offense","none","defense","offense"]` });
+
+    let labels = null;
+    for (let m = 0; m < models.length; m++) {
+      try {
+        const res = await axios.post(
+          `https://generativelanguage.googleapis.com/v1beta/models/${models[m]}:generateContent?key=${apiKey}`,
+          {
+            contents: [{ parts }],
+            generationConfig: { temperature: 0, maxOutputTokens: 100, thinkingConfig: { thinkingBudget: 0 } },
+          },
+          { timeout: 30000 }
+        );
+        const text = res.data?.candidates?.[0]?.content?.parts?.[0]?.text || '[]';
+        const json = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        const parsed = JSON.parse(json);
+        if (Array.isArray(parsed)) { labels = parsed; break; }
+      } catch (err) {
+        console.error(`[classify] Model ${models[m]} failed:`, err.message);
+        if (m < models.length - 1) await new Promise(r => setTimeout(r, 800));
+      }
+    }
+
+    if (!Array.isArray(labels)) labels = batch.map(() => 'none');
+    batch.forEach((f, idx) => {
+      const label = (typeof labels[idx] === 'string' ? labels[idx] : 'none').toLowerCase().trim();
+      const clean = ['offense', 'defense'].includes(label) ? label : 'none';
+      results.push({ ...f, label: clean });
+    });
+
+    console.log(`[classify] Batch ${Math.floor(i / batchSize) + 1}: ${labels.join(', ')}`);
+    if (i + batchSize < frames.length) await new Promise(r => setTimeout(r, 250));
+  }
+
+  console.log(`[classify] Done: ${results.length} frames classified`);
+  return results;
+}
 // ─── Assign best frame per section spread across video timeline ───────────
 function assignFramesToSections(qualifyingFrames, sections) {
   if (qualifyingFrames.length === 0) return sections.map(s => ({ ...s, bestFramePath: null }));
@@ -788,66 +870,70 @@ app.post('/extract-screenshots', async (req, res) => {
     console.log(`[screenshots] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
 
     // ── Step 2: Sample frames every 6s (sequential) ───────────────────────
-    sampledFrames = await sampleFramesFromVideo(tmpVideo, 3);
+    sampledFrames = await sampleFramesFromVideo(tmpVideo, 6);
     if (sampledFrames.length === 0) throw new Error('No frames could be extracted from video');
 
     // ── Step 3: Pixel pre-filter (free, no Gemini cost) ─────────────────────
     const apiKey = process.env.GEMINI_API_KEY;
     const preFiltered = await preFilterFrames(sampledFrames);
-    const poolFrames = preFiltered.length >= 5 ? preFiltered : sampledFrames;
-    console.log(`[screenshots] Using ${poolFrames.length} frames for Gemini scoring`);
+    const basePool = preFiltered.length >= 5 ? preFiltered : sampledFrames;
+    const poolFrames = capFrames(basePool, 30, 10);
+    console.log(`[screenshots] ${basePool.length} frames after pre-filter, capped to ${poolFrames.length} for Gemini`);
 
     // ── Step 4: Score per section with reference comparison ───────────────
     const sections = thread.sections || [];
     let sectionsWithFrames;
 
-    if (apiKey && sections.length > 0) {
-      const sectionResults = await scoreFramesForSections(poolFrames, sections, apiKey);
+    if (apiKey && sections.length > 0 && poolFrames.length > 0) {
+      // Classify each frame ONCE (offense / defense / none), then assign in code
+      const classified = await classifyFramesBatched(poolFrames, apiKey, 4);
 
-      // Pick best frame per section — spread across timeline, no duplicates
       const usedTimestamps = new Set();
       const totalDuration = poolFrames[poolFrames.length - 1]?.timestamp || 600;
       const sectionCount = sections.length;
 
+      const defWords = ['coverage', 'zone', 'man', 'press', 'bracket', 'double', 'safety', 'cornerback', 'cb', 'linebacker', 'blitz', 'disguise', 'cover 2', 'cover 3', 'cover 4', 'nickel', 'dime', 'prevent'];
+
       sectionsWithFrames = sections.map((section, index) => {
-        const matches = sectionResults[section.number] || [];
+        const combined = ((section.title || '') + ' ' + (section.content || '')).toLowerCase();
+        const wantType = defWords.some(w => combined.includes(w)) ? 'defense' : 'offense';
+
         const zoneStart = (totalDuration / sectionCount) * index;
         const zoneEnd = (totalDuration / sectionCount) * (index + 1);
         const zoneCenter = (zoneStart + zoneEnd) / 2;
 
-        // Filter: matches in this section's zone that haven't been used
-        const zoneMatches = matches.filter(
-          f => f.timestamp >= zoneStart && f.timestamp < zoneEnd && !usedTimestamps.has(f.timestamp)
+        // 1. Prefer correct-type frames in this zone, unused
+        let candidates = classified.filter(
+          f => f.label === wantType && !usedTimestamps.has(f.timestamp) &&
+               f.timestamp >= zoneStart && f.timestamp < zoneEnd
         );
-        // Fallback: any unused match closest to zone center
-        const unusedMatches = matches.filter(f => !usedTimestamps.has(f.timestamp));
-        const candidates = zoneMatches.length > 0 ? zoneMatches : unusedMatches;
+        // 2. Any correct-type frame, unused
+        if (candidates.length === 0) {
+          candidates = classified.filter(f => f.label === wantType && !usedTimestamps.has(f.timestamp));
+        }
+        // 3. Any overlay frame (offense OR defense), unused
+        if (candidates.length === 0) {
+          candidates = classified.filter(f => f.label !== 'none' && !usedTimestamps.has(f.timestamp));
+        }
+        // 4. Absolute fallback: any unused pooled frame so the section still gets an image
+        if (candidates.length === 0) {
+          candidates = poolFrames.filter(f => !usedTimestamps.has(f.timestamp));
+        }
 
-        let pick = null;
-        if (candidates.length > 0) {
-          // Pick the candidate closest to zone center
-          pick = candidates.reduce((best, f) =>
-            Math.abs(f.timestamp - zoneCenter) < Math.abs(best.timestamp - zoneCenter) ? f : best
-          );
-          usedTimestamps.add(pick.timestamp);
-          console.log(`[assign] Section ${section.number}: frame at ${pick.timestamp}s (zone ${Math.floor(zoneStart)}-${Math.floor(zoneEnd)}s)`);
-          return { ...section, bestFramePath: pick.path, timestamp_sec: pick.timestamp };
-        } else {
-          console.warn(`[assign] Section ${section.number}: no matches, using zone fallback`);
+        if (candidates.length === 0) {
+          console.warn(`[assign] Section ${section.number}: no frame available`);
           return { ...section, bestFramePath: null, timestamp_sec: null };
         }
-      });
 
-      // For sections with no match, use assignFramesToSections as fallback
-      const noMatch = sectionsWithFrames.filter(s => !s.timestamp_sec);
-      if (noMatch.length > 0) {
-        const fallback = assignFramesToSections(poolFrames, noMatch);
-        sectionsWithFrames = sectionsWithFrames.map(s => {
-          if (s.timestamp_sec) return s;
-          return fallback.find(f => f.number === s.number) || s;
-        });
-      }
+        const pick = candidates.reduce((best, f) =>
+          Math.abs(f.timestamp - zoneCenter) < Math.abs(best.timestamp - zoneCenter) ? f : best
+        );
+        usedTimestamps.add(pick.timestamp);
+        console.log(`[assign] Section ${section.number} (${wantType}): frame at ${pick.timestamp}s`);
+        return { ...section, bestFramePath: pick.path, timestamp_sec: pick.timestamp };
+      });
     } else {
+      // No API key or no sections — fall back to even timeline spread
       sectionsWithFrames = assignFramesToSections(poolFrames, sections);
     }
 
