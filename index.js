@@ -72,7 +72,7 @@ function ratingValue(s) {
   return isNaN(num) ? 0 : num;
 }
 
-async function getRandomTestimonial() {
+async function getRandomTestimonialImage() {
   try {
     const res = await axios.get(REVIEWS_CSV_URL, { timeout: 15000, responseType: 'text' });
     const rows = parseCSV(res.data);
@@ -84,8 +84,10 @@ async function getRandomTestimonial() {
 
     const usable = dataRows.filter(r => {
       const text = (r[2] || '').trim();
-      if (ratingValue(r[1]) < 4) return false;       // 4–5 stars only
-      if (text.length < 15) return false;             // skip near-empty reviews
+      const img = (r[4] || '').trim();           // column E
+      if (!img.startsWith('http')) return false; // must have an image
+      if (ratingValue(r[1]) < 4) return false;   // 4–5 stars only
+      if (text.length < 15) return false;        // skip near-empty reviews
       const low = text.toLowerCase();
       if (banned.some(b => low.includes(b))) return false; // skip "accidental" junk
       return true;
@@ -93,7 +95,7 @@ async function getRandomTestimonial() {
 
     if (usable.length === 0) return null;
     const pick = usable[Math.floor(Math.random() * usable.length)];
-    return pick[2].trim();
+    return pick[4].trim();  // the image URL
   } catch (e) {
     console.error('[testimonial] Failed to fetch:', e.message);
     return null;
@@ -781,23 +783,31 @@ app.post('/post-thread', async (req, res) => {
       };
     });
 
-    // Insert a random member testimonial as the 2nd-to-last tweet (before CTA)
+    // Insert a random member review image as the 2nd-to-last tweet (before CTA)
     try {
-      const testimonial = await getRandomTestimonial();
-      if (testimonial) {
-        tweets.splice(tweets.length - 1, 0, {
-          status: `🗣️ Real results from Madden Academy members:\n\n"${testimonial}"`,
-          count: 0,
-          media: [],
-          guid: uuidv4(),
-          published: false,
-          quoteTweetData: null,
-          isTrusted: true,
-        });
-        tweets.forEach((t, i) => { t.count = i; }); // renumber counts after splice
-        console.log(`[post-thread] Inserted testimonial tweet (now ${tweets.length} tweets)`);
+      const imgUrl = await getRandomTestimonialImage();
+      if (imgUrl) {
+        const tmpReview = path.join('/tmp', `review_${Date.now()}.png`);
+        const dl = await axios.get(imgUrl, { responseType: 'arraybuffer', timeout: 30000 });
+        fs.writeFileSync(tmpReview, dl.data);
+        const reviewMedia = await uploadImageToHypefury(tmpReview, token);
+        try { fs.unlinkSync(tmpReview); } catch (e) {}
+
+        if (reviewMedia) {
+          tweets.splice(tweets.length - 1, 0, {
+            status: '🗣️ Real results from Madden Academy members:',
+            count: 0,
+            media: [reviewMedia],
+            guid: uuidv4(),
+            published: false,
+            quoteTweetData: null,
+            isTrusted: true,
+          });
+          tweets.forEach((t, i) => { t.count = i; });
+          console.log(`[post-thread] Inserted testimonial image tweet (now ${tweets.length} tweets)`);
+        }
       } else {
-        console.log('[post-thread] No usable testimonial found, posting without one');
+        console.log('[post-thread] No usable testimonial image found');
       }
     } catch (e) {
       console.error('[post-thread] Testimonial step failed (non-fatal):', e.message);
