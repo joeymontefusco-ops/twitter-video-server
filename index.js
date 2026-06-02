@@ -39,6 +39,67 @@ async function refreshHypefuryToken() {
   }
 }
 
+// ─── Fetch a random high-rated testimonial from the 16 Spaces Reviews sheet ─
+const REVIEWS_CSV_URL = 'https://docs.google.com/spreadsheets/d/1DD0waI33IMHTTF-av1A78Ge2tB6V47GadsLAsAy2WCk/export?format=csv&gid=0';
+
+// Minimal CSV parser (handles quoted fields with commas/newlines)
+function parseCSV(text) {
+  const rows = [];
+  let row = [], field = '', inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i], next = text[i + 1];
+    if (inQuotes) {
+      if (c === '"' && next === '"') { field += '"'; i++; }
+      else if (c === '"') { inQuotes = false; }
+      else { field += c; }
+    } else {
+      if (c === '"') inQuotes = true;
+      else if (c === ',') { row.push(field); field = ''; }
+      else if (c === '\r') { /* skip */ }
+      else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else field += c;
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function ratingValue(s) {
+  if (!s) return 0;
+  const stars = (s.match(/[⭐★✩]/g) || []).length;
+  if (stars > 0) return stars;
+  const num = parseFloat(s);
+  return isNaN(num) ? 0 : num;
+}
+
+async function getRandomTestimonial() {
+  try {
+    const res = await axios.get(REVIEWS_CSV_URL, { timeout: 15000, responseType: 'text' });
+    const rows = parseCSV(res.data);
+    if (rows.length < 2) return null;
+
+    // Columns: A=Timestamp, B=Rating, C=Review Text, D=Email, E=Image, F=Course
+    const dataRows = rows.slice(1);
+    const banned = ['accident', "didn't finish", 'did not finish', 'by mistake', 'pressed complete', 'hit button', 'went to end'];
+
+    const usable = dataRows.filter(r => {
+      const text = (r[2] || '').trim();
+      if (ratingValue(r[1]) < 4) return false;       // 4–5 stars only
+      if (text.length < 15) return false;             // skip near-empty reviews
+      const low = text.toLowerCase();
+      if (banned.some(b => low.includes(b))) return false; // skip "accidental" junk
+      return true;
+    });
+
+    if (usable.length === 0) return null;
+    const pick = usable[Math.floor(Math.random() * usable.length)];
+    return pick[2].trim();
+  } catch (e) {
+    console.error('[testimonial] Failed to fetch:', e.message);
+    return null;
+  }
+}
+
 function generateOAuthHeader(method, url, params, credentials) {
   const oauthParams = {
     oauth_consumer_key: credentials.consumerKey,
@@ -719,6 +780,28 @@ app.post('/post-thread', async (req, res) => {
         ...(index > 0 ? { isTrusted: true } : {}),
       };
     });
+
+    // Insert a random member testimonial as the 2nd-to-last tweet (before CTA)
+    try {
+      const testimonial = await getRandomTestimonial();
+      if (testimonial) {
+        tweets.splice(tweets.length - 1, 0, {
+          status: `🗣️ Real results from Madden Academy members:\n\n"${testimonial}"`,
+          count: 0,
+          media: [],
+          guid: uuidv4(),
+          published: false,
+          quoteTweetData: null,
+          isTrusted: true,
+        });
+        tweets.forEach((t, i) => { t.count = i; }); // renumber counts after splice
+        console.log(`[post-thread] Inserted testimonial tweet (now ${tweets.length} tweets)`);
+      } else {
+        console.log('[post-thread] No usable testimonial found, posting without one');
+      }
+    } catch (e) {
+      console.error('[post-thread] Testimonial step failed (non-fatal):', e.message);
+    }
 
     const payload = {
       currentUserId: userId,
