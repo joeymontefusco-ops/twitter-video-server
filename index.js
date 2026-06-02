@@ -1409,7 +1409,8 @@ app.post('/submit-to-opusclip', async (req, res) => {
   try {
     // ── Step 1: Download video from Drive ──────────────────────────────────
     console.log(`[opusclip-submit] Downloading video ${driveFileId}...`);
-    const dlRes = await axios.get(driveUrl, { responseType: 'stream', timeout: 300000 });
+    const realDriveUrl = `https://drive.usercontent.google.com/download?id=${driveFileId}&export=download&confirm=t`;
+    const dlRes = await axios.get(realDriveUrl, { responseType: 'stream', timeout: 300000 });
     const writer = fs.createWriteStream(tmpVideo);
     await new Promise((resolve, reject) => {
       dlRes.data.pipe(writer);
@@ -1419,6 +1420,9 @@ app.post('/submit-to-opusclip', async (req, res) => {
 
     const fileSize = fs.statSync(tmpVideo).size;
     console.log(`[opusclip-submit] Downloaded: ${(fileSize / 1024 / 1024).toFixed(1)}MB`);
+    if (fileSize < 100 * 1024) { // under 100KB = not a real video, almost certainly an HTML error page
+      throw new Error(`Download too small (${fileSize} bytes) — Drive likely returned an error page, not the video. Check file sharing/permissions for ${driveFileId}.`);
+    }
 
     // ── Step 2: Get upload link from OpusClip ─────────────────────────────
     console.log('[opusclip-submit] Getting upload link...');
