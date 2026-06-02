@@ -588,7 +588,7 @@ const thumbnailName = `${userId}/thumbnail-${imageId}.png`;
     name: fileName,
     type: 'image/png',
     size: fileSize,
-    altText: '',
+    altText: 'Madden 26 tips',
     thumbnail: thumbnailName,
   };
 }
