@@ -903,7 +903,24 @@ app.post('/post-thread', async (req, res) => {
       }
     );
 
-    // ─── /get-thread-tweet-url ────────────────────────────────────────────────
+    console.log('[post-thread] Thread posted successfully:', response.data);
+
+    res.json({
+      success: true,
+      hypefuryPostId: response.data?.postId || null,
+      hypefuryResponse: response.data,
+    });
+
+  } catch (err) {
+    console.error('[post-thread] Error:', err.response?.data || err.message);
+    res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
+// ─── /get-thread-tweet-url ────────────────────────────────────────────────
 // Given a hypefuryPostId, returns the public Twitter URL of the thread's
 // first tweet. Polls Firestore until Hypefury has published the thread.
 app.post('/get-thread-tweet-url', async (req, res) => {
@@ -913,9 +930,8 @@ app.post('/get-thread-tweet-url', async (req, res) => {
     return res.status(400).json({ error: 'Missing hypefuryPostId' });
   }
   const handle = twitterHandle || 'MaddenAcademy_';
-  const maxWaitMs = (maxWaitSeconds || 300) * 1000; // default 5 min
+  const maxWaitMs = (maxWaitSeconds || 300) * 1000;
 
-  // Make sure JWT is fresh
   if (!hypefuryToken || Date.now() > tokenExpiry) {
     await refreshHypefuryToken();
   }
@@ -932,7 +948,7 @@ app.post('/get-thread-tweet-url', async (req, res) => {
       attempts++;
       const r = await axios.get(url, {
         headers: { Authorization: `Bearer ${hypefuryToken}` },
-        validateStatus: () => true, // don't throw on 404 etc
+        validateStatus: () => true,
       });
 
       if (r.status === 200) {
@@ -949,47 +965,26 @@ app.post('/get-thread-tweet-url', async (req, res) => {
             attempts,
           });
         }
-        // Doc exists but tweetIds not yet populated → still publishing
         console.log(`[get-thread-tweet-url] Attempt ${attempts}: doc exists but tweetIds not populated yet`);
       } else if (r.status === 404) {
         console.log(`[get-thread-tweet-url] Attempt ${attempts}: thread doc not found yet`);
       } else if (r.status === 401) {
-        // Token might have expired mid-poll, refresh and retry
         console.log(`[get-thread-tweet-url] Attempt ${attempts}: 401, refreshing token`);
         await refreshHypefuryToken();
       } else {
         console.log(`[get-thread-tweet-url] Attempt ${attempts}: HTTP ${r.status}`);
       }
 
-      // Wait 15s before retrying
       await new Promise(r => setTimeout(r, 15000));
     }
 
     return res.status(408).json({
       success: false,
-      error: `Thread not published after ${maxWaitSeconds || 300}s (${attempts} attempts). hypefuryPostId may be wrong, or Hypefury hasn't published the thread yet.`,
+      error: `Thread not published after ${maxWaitSeconds || 300}s (${attempts} attempts).`,
     });
   } catch (err) {
     console.error('[get-thread-tweet-url] Error:', err.response?.data || err.message);
     return res.status(500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
-
-
-    console.log('[post-thread] Thread posted successfully:', response.data);
-
-    res.json({
-      success: true,
-      hypefuryPostId: response.data?.postId || null,
-      hypefuryResponse: response.data,
-    });
-
-  } catch (err) {
-    console.error('[post-thread] Error:', err.response?.data || err.message);
-    res.status(500).json({
       success: false,
       error: err.response?.data || err.message,
     });
