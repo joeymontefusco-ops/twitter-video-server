@@ -717,7 +717,7 @@ app.post('/post-thread', async (req, res) => {
     return res.status(401).json({ error: 'No Hypefury token available' });
   }
 
-  res.json({ success: true, message: 'Posting thread to Hypefury...' });
+
 
   try {
     const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
@@ -905,8 +905,18 @@ app.post('/post-thread', async (req, res) => {
 
     console.log('[post-thread] Thread posted successfully:', response.data);
 
+    res.json({
+      success: true,
+      hypefuryPostId: response.data?.postId || null,
+      hypefuryResponse: response.data,
+    });
+
   } catch (err) {
     console.error('[post-thread] Error:', err.response?.data || err.message);
+    res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
   }
 });
 
