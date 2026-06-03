@@ -655,7 +655,96 @@ const thumbnailName = `${userId}/thumbnail-${imageId}.png`;
     thumbnail: thumbnailName,
   };
 }
+// ─── Upload video to Hypefury Firebase Storage ────────────────────────────
+// Mirrors uploadImageToHypefury, but for mp4 video with a real poster-frame
+// thumbnail (extracted via ffmpeg). Returns the media object Hypefury expects.
+async function uploadVideoToHypefury(videoPath, jwtToken) {
+  const videoId = uuidv4();
+  const fileName = `${videoId}.mp4`;
+  const thumbnailName = `thumbnail-${videoId}.png`;
+  const bucket = 'hypefury-896c7.appspot.com';
+  const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
 
+  const videoBuffer = fs.readFileSync(videoPath);
+  const videoSize = videoBuffer.length;
+
+  // ── Step 1: Extract poster frame at 1s with ffmpeg ─────────────────────
+  const tmpThumb = path.join('/tmp', `vid-thumb-${videoId}.png`);
+  try {
+    execSync(`ffmpeg -y -ss 1 -i "${videoPath}" -vframes 1 -q:v 2 "${tmpThumb}"`, { stdio: 'pipe' });
+  } catch (e) {
+    // If 1s seek fails (very short video), grab first frame
+    execSync(`ffmpeg -y -i "${videoPath}" -vframes 1 -q:v 2 "${tmpThumb}"`, { stdio: 'pipe' });
+  }
+  const thumbBuffer = fs.readFileSync(tmpThumb);
+  const thumbSize = thumbBuffer.length;
+
+  // ── Step 2: Init upload for the video ──────────────────────────────────
+  const videoInit = await axios.post(
+    `${baseUrl}?name=${fileName}`,
+    { name: fileName },
+    {
+      headers: {
+        'Authorization': `Firebase ${jwtToken}`,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': videoSize.toString(),
+        'X-Goog-Upload-Header-Content-Type': 'video/mp4',
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  const videoUploadUrl = videoInit.headers['x-goog-upload-url'];
+  if (!videoUploadUrl) throw new Error('No upload URL from Firebase Storage for video');
+
+  await axios.post(videoUploadUrl, videoBuffer, {
+    headers: {
+      'Content-Type': 'video/mp4',
+      'X-Goog-Upload-Command': 'upload, finalize',
+      'X-Goog-Upload-Offset': '0',
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+
+  // ── Step 3: Init + upload the poster thumbnail ─────────────────────────
+  const thumbInit = await axios.post(
+    `${baseUrl}?name=${thumbnailName}`,
+    { name: thumbnailName },
+    {
+      headers: {
+        'Authorization': `Firebase ${jwtToken}`,
+        'X-Goog-Upload-Protocol': 'resumable',
+        'X-Goog-Upload-Command': 'start',
+        'X-Goog-Upload-Header-Content-Length': thumbSize.toString(),
+        'X-Goog-Upload-Header-Content-Type': 'image/png',
+        'Content-Type': 'application/json',
+      },
+    }
+  );
+  const thumbUploadUrl = thumbInit.headers['x-goog-upload-url'];
+  if (thumbUploadUrl) {
+    await axios.post(thumbUploadUrl, thumbBuffer, {
+      headers: {
+        'Content-Type': 'image/png',
+        'X-Goog-Upload-Command': 'upload, finalize',
+        'X-Goog-Upload-Offset': '0',
+      },
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+  }
+
+  try { fs.unlinkSync(tmpThumb); } catch (e) {}
+
+  return {
+    name: fileName,
+    type: 'video/mp4',
+    size: videoSize,
+    altText: '',
+    thumbnail: thumbnailName,
+  };
+}
 // ─── Launch Puppeteer browser ──────────────────────────────────────────────
 async function launchBrowser() {
   return puppeteer.launch({
@@ -985,6 +1074,173 @@ app.post('/get-thread-tweet-url', async (req, res) => {
   } catch (err) {
     console.error('[get-thread-tweet-url] Error:', err.response?.data || err.message);
     return res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
+// ─── /quote-tweet-hypefury ────────────────────────────────────────────────
+// Posts a quote tweet via Hypefury. Downloads a video from a URL, uploads it
+// to Hypefury Firebase Storage, then creates a Hypefury post whose last line
+// is the target tweet URL — Hypefury auto-converts it to a quote tweet.
+app.post('/quote-tweet-hypefury', async (req, res) => {
+  const { videoUrl, originalTweetUrl, commentText, quoteUserId } = req.body;
+
+  if (!videoUrl) return res.status(400).json({ error: 'Missing videoUrl' });
+  if (!originalTweetUrl) return res.status(400).json({ error: 'Missing originalTweetUrl' });
+
+  // Default to Manu's account; allow override
+  const userId = quoteUserId || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+
+  if (!hypefuryToken || Date.now() > tokenExpiry) {
+    await refreshHypefuryToken();
+  }
+  if (!hypefuryToken) {
+    return res.status(401).json({ error: 'No Hypefury token available' });
+  }
+  const token = hypefuryToken;
+
+  const tmpVideo = path.join('/tmp', `qt_${Date.now()}_${uuidv4()}.mp4`);
+
+  try {
+    // ── Step 1: Download the video ─────────────────────────────────────────
+    console.log(`[quote-tweet-hypefury] Downloading video from ${videoUrl.substring(0, 80)}...`);
+    const dl = await axios.get(videoUrl, {
+      responseType: 'stream',
+      timeout: 300000,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    });
+    const writer = fs.createWriteStream(tmpVideo);
+    await new Promise((resolve, reject) => {
+      dl.data.pipe(writer);
+      writer.on('finish', resolve);
+      writer.on('error', reject);
+    });
+
+    const videoSize = fs.statSync(tmpVideo).size;
+    console.log(`[quote-tweet-hypefury] Downloaded: ${(videoSize / 1024 / 1024).toFixed(1)}MB`);
+
+    if (videoSize < 100 * 1024) {
+      throw new Error(`Video too small (${videoSize} bytes) — source URL returned an error page, not a real video.`);
+    }
+
+    // ── Step 2: Upload video to Hypefury ───────────────────────────────────
+    console.log('[quote-tweet-hypefury] Uploading video to Hypefury...');
+    const videoMedia = await uploadVideoToHypefury(tmpVideo, token);
+    console.log(`[quote-tweet-hypefury] Video uploaded: ${videoMedia.name}`);
+
+    // ── Step 3: Build the post payload ─────────────────────────────────────
+    const status = commentText
+      ? `${commentText}\n\n${originalTweetUrl}`
+      : originalTweetUrl;
+
+    const payload = {
+      currentUserId: userId,
+      post: {
+        midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+        slotType: 'post',
+        time: new Date().toISOString(),
+        scheduled: false,
+        user: userId,
+        publishingError: null,
+        deleted: false,
+        tweets: [
+          {
+            status,
+            count: 0,
+            media: [videoMedia],
+            guid: uuidv4(),
+            published: false,
+            quoteTweetData: null,
+          },
+        ],
+        lastAutoRTTime: null,
+        isFavorite: false,
+        type: 'post',
+        tweetIds: null,
+        conditionalRetweetsConditions: {
+          delayForRetweet: '1 hour',
+          minRetweetsThreshold: null,
+          minFavoritesThreshold: 5,
+        },
+        autoplug: { processed: false, minRetweets: null, minFavorites: 0, templateName: null, status: '' },
+        postNow: false,
+        source: null,
+        writer: null,
+        growthProgram: null,
+        tweetshot: null,
+        shareOnInstagram: false,
+        linkedIn: null,
+        facebook: null,
+        delayBetweenTweets: null,
+        tweetMetricsUpdatedAt: null,
+        categories: [],
+        recurrentPostRef: null,
+        replyToTweetId: null,
+        replyToTweetInfo: null,
+        isCancelled: false,
+        tweetsCount: 1,
+        isCloned: false,
+        isRecurrentPost: false,
+        timerData: null,
+        isPinned: false,
+        ghostwritingRefusal: null,
+        ghostwritingStatus: null,
+        impressionsCountOfTheFirstTweet: null,
+        tweetshotContent: null,
+        instagramPublishingError: null,
+        facebookPublishingError: null,
+        publishedToInstagram: false,
+        autoDM: null,
+        hasThreadFinisherTweet: false,
+        created_at: null,
+        linkedInPublishingError: null,
+        isRecurrentPostDisabled: false,
+        instagramThreadFinisherText: null,
+        lastClonePostedTime: null,
+        isDeletedFromTwitter: false,
+        isLongTweetshot: true,
+        isLargeFontTweetshot: false,
+        tweetReel: null,
+        tiktok: null,
+        ama: null,
+        youtubeShortRef: null,
+        threads: null,
+        tiktokPublishingError: null,
+      },
+    };
+
+    // ── Step 4: POST to Hypefury ───────────────────────────────────────────
+    console.log(`[quote-tweet-hypefury] Posting quote tweet to Hypefury (account ${userId})...`);
+    const response = await axios.post(
+      'https://app.hypefury.com/api/posts/save',
+      payload,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Origin': 'https://app.hypefury.com',
+          'Referer': 'https://app.hypefury.com/queue',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+        },
+      }
+    );
+
+    console.log('[quote-tweet-hypefury] Posted:', response.data);
+
+    try { fs.unlinkSync(tmpVideo); } catch (e) {}
+
+    res.json({
+      success: true,
+      hypefuryPostId: response.data?.postId || null,
+      hypefuryResponse: response.data,
+    });
+  } catch (err) {
+    console.error('[quote-tweet-hypefury] Error:', err.response?.data || err.message);
+    try { fs.unlinkSync(tmpVideo); } catch (e) {}
+    res.status(500).json({
       success: false,
       error: err.response?.data || err.message,
     });
