@@ -1045,12 +1045,40 @@ app.post('/get-thread-tweet-url', async (req, res) => {
         const firstId = values[0]?.stringValue;
         if (firstId) {
           const tweetUrl = `https://x.com/${handle}/status/${firstId}`;
+
+          // Extract first tweet's text from the thread doc (for the quote card)
+          const tweetsArr = r.data?.fields?.tweets?.arrayValue?.values || [];
+          const firstTweetText = tweetsArr[0]?.mapValue?.fields?.status?.stringValue || '';
+
+          // Hardcoded TMA profile info (doesn't change)
+          const profileByHandle = {
+            'MaddenAcademy_': {
+              userDisplayName: 'TheMaddenAcademy',
+              userProfilePictureURL: 'https://pbs.twimg.com/profile_images/1683535076552785925/NW4iUAkc_normal.jpg',
+            },
+            'ManuGinobili987': {
+              userDisplayName: 'Manu - TheMaddenAcademy CEO',
+              userProfilePictureURL: 'https://pbs.twimg.com/profile_images/1481427621753896965/zQbhCHfM_normal.jpg',
+            },
+          };
+          const profile = profileByHandle[handle] || { userDisplayName: handle, userProfilePictureURL: '' };
+
+          const quoteTweetData = {
+            text: firstTweetText,
+            userProfilePictureURL: profile.userProfilePictureURL,
+            userDisplayName: profile.userDisplayName,
+            username: handle,
+            tweetId: firstId,
+            url: tweetUrl,
+          };
+
           console.log(`[get-thread-tweet-url] Resolved in ${attempts} attempt(s): ${tweetUrl}`);
           return res.json({
             success: true,
             tweetUrl,
             tweetId: firstId,
             allTweetIds: values.map(v => v.stringValue),
+            quoteTweetData,
             attempts,
           });
         }
@@ -1085,10 +1113,28 @@ app.post('/get-thread-tweet-url', async (req, res) => {
 // to Hypefury Firebase Storage, then creates a Hypefury post whose last line
 // is the target tweet URL — Hypefury auto-converts it to a quote tweet.
 app.post('/quote-tweet-hypefury', async (req, res) => {
-  const { videoUrl, originalTweetUrl, commentText, quoteUserId } = req.body;
+  const { videoUrl, originalTweetUrl, quoteTweetData, commentText, quoteUserId } = req.body;
 
   if (!videoUrl) return res.status(400).json({ error: 'Missing videoUrl' });
-  if (!originalTweetUrl) return res.status(400).json({ error: 'Missing originalTweetUrl' });
+  if (!quoteTweetData && !originalTweetUrl) {
+    return res.status(400).json({ error: 'Missing quoteTweetData or originalTweetUrl' });
+  }
+
+  // Build quoteTweetData from originalTweetUrl if not provided (fallback path)
+  let finalQuoteData = quoteTweetData;
+  if (!finalQuoteData) {
+    const match = originalTweetUrl.match(/(?:twitter|x)\.com\/([^/]+)\/status\/(\d+)/);
+    if (!match) return res.status(400).json({ error: 'Invalid originalTweetUrl' });
+    const [, username, tweetId] = match;
+    finalQuoteData = {
+      text: '',
+      userProfilePictureURL: '',
+      userDisplayName: username,
+      username,
+      tweetId,
+      url: originalTweetUrl,
+    };
+  }
 
   // Default to Manu's account; allow override
   const userId = quoteUserId || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
@@ -1132,9 +1178,8 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
     console.log(`[quote-tweet-hypefury] Video uploaded: ${videoMedia.name}`);
 
     // ── Step 3: Build the post payload ─────────────────────────────────────
-    const status = commentText
-      ? `${commentText}\n\n${originalTweetUrl}`
-      : originalTweetUrl;
+    // For real quote tweets the URL goes in quoteTweetData, not in the status text
+    const status = commentText || '';
 
     const payload = {
       currentUserId: userId,
@@ -1153,7 +1198,7 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
             media: [videoMedia],
             guid: uuidv4(),
             published: false,
-            quoteTweetData: null,
+            quoteTweetData: finalQuoteData,
           },
         ],
         lastAutoRTTime: null,
