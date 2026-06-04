@@ -883,7 +883,7 @@ app.post('/post-thread', async (req, res) => {
         try { fs.unlinkSync(tmpReview); } catch (e) {}
 
         if (reviewMedia) {
-          tweets.splice(tweets.length - 1, 0, {
+          tweets.splice(tweets.length - 2, 0, {
             status: '🗣️ Real results from Madden Academy members:',
             count: 0,
             media: [reviewMedia],
