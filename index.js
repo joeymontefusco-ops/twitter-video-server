@@ -1325,6 +1325,43 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
       },
     };
 
+
+
+    // ── Step 4: POST to Hypefury ───────────────────────────────────────────
+    console.log(`[quote-tweet-hypefury] Posting quote tweet to Hypefury (account ${userId})...`);
+    const response = await axios.post(
+      'https://app.hypefury.com/api/posts/save',
+      payload,
+      {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Origin': 'https://app.hypefury.com',
+          'Referer': 'https://app.hypefury.com/queue',
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+        },
+      }
+    );
+
+    console.log('[quote-tweet-hypefury] Posted:', response.data);
+
+    try { fs.unlinkSync(tmpVideo); } catch (e) {}
+
+    res.json({
+      success: true,
+      hypefuryPostId: response.data?.postId || null,
+      hypefuryResponse: response.data,
+    });
+  } catch (err) {
+    console.error('[quote-tweet-hypefury] Error:', err.response?.data || err.message);
+    try { fs.unlinkSync(tmpVideo); } catch (e) {}
+    res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
 // ─── /post-to-youtube-community ───────────────────────────────────────────
 // Takes a thread object + image URLs, posts to TMA's YouTube Community tab.
 app.post('/post-to-youtube-community', async (req, res) => {
@@ -1378,42 +1415,6 @@ app.post('/post-to-youtube-community', async (req, res) => {
     });
   }
 });
-
-    // ── Step 4: POST to Hypefury ───────────────────────────────────────────
-    console.log(`[quote-tweet-hypefury] Posting quote tweet to Hypefury (account ${userId})...`);
-    const response = await axios.post(
-      'https://app.hypefury.com/api/posts/save',
-      payload,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Origin': 'https://app.hypefury.com',
-          'Referer': 'https://app.hypefury.com/queue',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        },
-      }
-    );
-
-    console.log('[quote-tweet-hypefury] Posted:', response.data);
-
-    try { fs.unlinkSync(tmpVideo); } catch (e) {}
-
-    res.json({
-      success: true,
-      hypefuryPostId: response.data?.postId || null,
-      hypefuryResponse: response.data,
-    });
-  } catch (err) {
-    console.error('[quote-tweet-hypefury] Error:', err.response?.data || err.message);
-    try { fs.unlinkSync(tmpVideo); } catch (e) {}
-    res.status(500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
-});
-
 
 // ─── /extract-screenshots ─────────────────────────────────────────────────
 // Approach: sample frames every 6s → Gemini Vision filters for route lines
