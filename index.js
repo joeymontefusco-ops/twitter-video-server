@@ -745,6 +745,74 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
     thumbnail: thumbnailName,
   };
 }
+// ─── YouTube Community Post helpers ───────────────────────────────────────
+
+async function refreshYouTubeToken(refreshToken) {
+  const res = await axios.post('https://oauth2.googleapis.com/token', {
+    client_id: process.env.YT_CLIENT_ID,
+    client_secret: process.env.YT_CLIENT_SECRET,
+    refresh_token: refreshToken,
+    grant_type: 'refresh_token',
+  });
+  return res.data.access_token;
+}
+
+async function postYouTubeCommunityPost(accessToken, text, imageUrls = []) {
+  // Build the media attachments if images provided
+  const images = imageUrls.slice(0, 10).map(url => ({ url }));
+
+  const body = {
+    snippet: {
+      type: images.length > 0 ? 'imagePost' : 'textPost',
+      textOriginal: text,
+      ...(images.length > 0 ? { images } : {}),
+    },
+  };
+
+  const res = await axios.post(
+    'https://www.googleapis.com/youtube/v3/communityPosts?part=snippet',
+    body,
+    {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      validateStatus: () => true,
+    }
+  );
+
+  return { status: res.status, data: res.data };
+}
+
+function buildYouTubeText(thread) {
+  // Concatenate thread into one YouTube Community post (Option B cleanup)
+  const parts = [];
+
+  // Hook — strip the Twitter-specific "In Comments Below" line
+  const hookLines = (thread.hook || '')
+    .split('\n')
+    .filter(l => !l.includes('In Comments Below') && !l.includes('breakdown in comments'))
+    .join('\n')
+    .trim();
+  if (hookLines) parts.push(hookLines);
+
+  // Sections
+  (thread.sections || []).forEach(s => {
+    const sectionText = (s.content || '').trim();
+    if (sectionText) parts.push(sectionText);
+  });
+
+  // CTA — swap Twitter-specific language for YouTube
+  const cta = (thread.cta || '')
+    .replace(/tweet/gi, 'post')
+    .replace(/Like ❤️ the tweet/gi, 'Like 👍 this post')
+    .replace(/Follow @MaddenAcademy_/gi, 'Subscribe to @TheMaddenAcademy')
+    .trim();
+  if (cta) parts.push(cta);
+
+  return parts.join('\n\n─────────────────\n\n');
+}
+
 // ─── Launch Puppeteer browser ──────────────────────────────────────────────
 async function launchBrowser() {
   return puppeteer.launch({
@@ -1257,6 +1325,60 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
       },
     };
 
+// ─── /post-to-youtube-community ───────────────────────────────────────────
+// Takes a thread object + image URLs, posts to TMA's YouTube Community tab.
+app.post('/post-to-youtube-community', async (req, res) => {
+  const { thread, imageUrls } = req.body;
+
+  if (!thread) return res.status(400).json({ error: 'Missing thread' });
+
+  const refreshToken = process.env.YT_TMA_REFRESH_TOKEN;
+  if (!refreshToken) {
+    return res.status(500).json({ error: 'YT_TMA_REFRESH_TOKEN not configured' });
+  }
+
+  try {
+    // Step 1: Get fresh access token
+    console.log('[youtube] Refreshing YouTube access token...');
+    const accessToken = await refreshYouTubeToken(refreshToken);
+
+    // Step 2: Build the post text
+    const text = buildYouTubeText(thread);
+    console.log(`[youtube] Post text built (${text.length} chars)`);
+
+    // Step 3: Post to YouTube Community
+    console.log('[youtube] Posting to TMA YouTube Community...');
+    const result = await postYouTubeCommunityPost(
+      accessToken,
+      text,
+      imageUrls || []
+    );
+
+    if (result.status === 200 || result.status === 201) {
+      console.log('[youtube] Posted successfully:', result.data?.id);
+      return res.json({
+        success: true,
+        postId: result.data?.id,
+        postUrl: result.data?.id
+          ? `https://www.youtube.com/post/${result.data.id}`
+          : null,
+      });
+    } else {
+      console.error('[youtube] Failed:', result.status, JSON.stringify(result.data));
+      return res.status(result.status).json({
+        success: false,
+        error: result.data,
+      });
+    }
+  } catch (err) {
+    console.error('[youtube] Error:', err.response?.data || err.message);
+    return res.status(500).json({
+      success: false,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
     // ── Step 4: POST to Hypefury ───────────────────────────────────────────
     console.log(`[quote-tweet-hypefury] Posting quote tweet to Hypefury (account ${userId})...`);
     const response = await axios.post(
@@ -1291,6 +1413,7 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
     });
   }
 });
+
 
 // ─── /extract-screenshots ─────────────────────────────────────────────────
 // Approach: sample frames every 6s → Gemini Vision filters for route lines
