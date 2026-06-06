@@ -783,7 +783,12 @@ async function postYouTubeCommunityPost(text) {
         utcOffsetMinutes: 480,
       },
       user: { lockedSafetyMode: false },
-      request: { useSsl: true },
+      request: {
+        useSsl: true,
+        consistencyTokenJars: process.env.YT_CONSISTENCY_TOKEN ? [{
+          encryptedTokenJarContents: process.env.YT_CONSISTENCY_TOKEN,
+        }] : [],
+      },
     },
     createBackstagePostParams: 'ChhVQ2xWRHlRYVIyWllZMXNQb3dPdXhOdEEQATICGAhKAggC',
     commentText: text,
