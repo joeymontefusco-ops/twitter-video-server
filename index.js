@@ -747,35 +747,55 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
 }
 // ─── YouTube Community Post helpers ───────────────────────────────────────
 
-async function refreshYouTubeToken(refreshToken) {
-  const res = await axios.post('https://oauth2.googleapis.com/token', {
-    client_id: process.env.YT_CLIENT_ID,
-    client_secret: process.env.YT_CLIENT_SECRET,
-    refresh_token: refreshToken,
-    grant_type: 'refresh_token',
-  });
-  return res.data.access_token;
+// ─── YouTube Community Post helpers ───────────────────────────────────────
+
+function generateSAPISIDHASH() {
+  const sapisid = process.env.YT_SAPISID;
+  const origin = process.env.YT_ORIGIN || 'https://www.youtube.com';
+  const timestamp = Math.floor(Date.now() / 1000);
+  const hash = require('crypto')
+    .createHash('sha1')
+    .update(`${timestamp} ${sapisid} ${origin}`)
+    .digest('hex');
+  return `SAPISIDHASH ${timestamp}_${hash}`;
 }
 
-async function postYouTubeCommunityPost(accessToken, text, imageUrls = []) {
-  // Build the media attachments if images provided
-  const images = imageUrls.slice(0, 10).map(url => ({ url }));
+async function postYouTubeCommunityPost(text) {
+  const cookie = process.env.YT_SESSION_COOKIE;
+  const authUser = process.env.YT_AUTH_USER || '2';
+  const origin = process.env.YT_ORIGIN || 'https://www.youtube.com';
 
-  const body = {
-    snippet: {
-      type: images.length > 0 ? 'imagePost' : 'textPost',
-      textOriginal: text,
-      ...(images.length > 0 ? { images } : {}),
+  const payload = {
+    context: {
+      client: {
+        hl: 'en',
+        gl: 'PH',
+        clientName: 'WEB',
+        clientVersion: '2.20260603.05.00',
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36,gzip(gfe)',
+        originalUrl: 'https://www.youtube.com',
+        platform: 'DESKTOP',
+      },
+      user: { lockedSafetyMode: false },
+      request: { useSsl: true },
     },
+    createBackstagePostParams: 'ChhVQ2xWRHlRYVIyWllZMXNQb3dPdXhOdEEQATICGAhKAggC',
+    commentText: text,
   };
 
   const res = await axios.post(
-    'https://www.googleapis.com/youtube/v3/communityPosts?part=snippet',
-    body,
+    'https://www.youtube.com/youtubei/v1/backstage/create_post?prettyPrint=false',
+    payload,
     {
       headers: {
-        Authorization: `Bearer ${accessToken}`,
+        'Authorization': generateSAPISIDHASH(),
         'Content-Type': 'application/json',
+        'Cookie': cookie,
+        'X-Goog-AuthUser': authUser,
+        'X-Origin': origin,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+        'Origin': origin,
+        'Referer': 'https://www.youtube.com/',
       },
       validateStatus: () => true,
     }
@@ -785,10 +805,8 @@ async function postYouTubeCommunityPost(accessToken, text, imageUrls = []) {
 }
 
 function buildYouTubeText(thread) {
-  // Concatenate thread into one YouTube Community post (Option B cleanup)
   const parts = [];
 
-  // Hook — strip the Twitter-specific "In Comments Below" line
   const hookLines = (thread.hook || '')
     .split('\n')
     .filter(l => !l.includes('In Comments Below') && !l.includes('breakdown in comments'))
@@ -796,13 +814,11 @@ function buildYouTubeText(thread) {
     .trim();
   if (hookLines) parts.push(hookLines);
 
-  // Sections
   (thread.sections || []).forEach(s => {
     const sectionText = (s.content || '').trim();
     if (sectionText) parts.push(sectionText);
   });
 
-  // CTA — swap Twitter-specific language for YouTube
   const cta = (thread.cta || '')
     .replace(/tweet/gi, 'post')
     .replace(/Like ❤️ the tweet/gi, 'Like 👍 this post')
@@ -1363,42 +1379,31 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
 });
 
 // ─── /post-to-youtube-community ───────────────────────────────────────────
-// Takes a thread object + image URLs, posts to TMA's YouTube Community tab.
 app.post('/post-to-youtube-community', async (req, res) => {
-  const { thread, imageUrls } = req.body;
+  const { thread } = req.body;
 
   if (!thread) return res.status(400).json({ error: 'Missing thread' });
 
-  const refreshToken = process.env.YT_TMA_REFRESH_TOKEN;
-  if (!refreshToken) {
-    return res.status(500).json({ error: 'YT_TMA_REFRESH_TOKEN not configured' });
+  if (!process.env.YT_SESSION_COOKIE || !process.env.YT_SAPISID) {
+    return res.status(500).json({ error: 'YouTube session credentials not configured' });
   }
 
   try {
-    // Step 1: Get fresh access token
-    console.log('[youtube] Refreshing YouTube access token...');
-    const accessToken = await refreshYouTubeToken(refreshToken);
-
-    // Step 2: Build the post text
     const text = buildYouTubeText(thread);
     console.log(`[youtube] Post text built (${text.length} chars)`);
 
-    // Step 3: Post to YouTube Community
     console.log('[youtube] Posting to TMA YouTube Community...');
-    const result = await postYouTubeCommunityPost(
-      accessToken,
-      text,
-      imageUrls || []
-    );
+    const result = await postYouTubeCommunityPost(text);
+
+    console.log(`[youtube] Response: HTTP ${result.status}`);
 
     if (result.status === 200 || result.status === 201) {
-      console.log('[youtube] Posted successfully:', result.data?.id);
+      const postId = result.data?.postId || result.data?.backstagePostId || null;
+      console.log('[youtube] Posted successfully:', postId);
       return res.json({
         success: true,
-        postId: result.data?.id,
-        postUrl: result.data?.id
-          ? `https://www.youtube.com/post/${result.data.id}`
-          : null,
+        postId,
+        postUrl: postId ? `https://www.youtube.com/post/${postId}` : null,
       });
     } else {
       console.error('[youtube] Failed:', result.status, JSON.stringify(result.data));
