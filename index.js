@@ -746,9 +746,6 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
   };
 }
 // ─── YouTube Community Post helpers ───────────────────────────────────────
-
-// ─── YouTube Community Post helpers ───────────────────────────────────────
-
 function generateSAPISIDHASH() {
   const sapisid = process.env.YT_SAPISID;
   const origin = process.env.YT_ORIGIN || 'https://www.youtube.com';
@@ -757,7 +754,10 @@ function generateSAPISIDHASH() {
     .createHash('sha1')
     .update(`${timestamp} ${sapisid} ${origin}`)
     .digest('hex');
-  return `SAPISIDHASH ${timestamp}_${hash}`;
+  const result = `SAPISIDHASH ${timestamp}_${hash}`;
+  console.log(`[youtube] SAPISID length: ${(sapisid || '').length}`);
+  console.log(`[youtube] Generated auth: SAPISIDHASH ${timestamp}_${hash.substring(0, 10)}...`);
+  return result;
 }
 
 async function postYouTubeCommunityPost(text) {
