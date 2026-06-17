@@ -1119,7 +1119,7 @@ app.post('/get-thread-tweet-url', async (req, res) => {
     return res.status(400).json({ error: 'Missing hypefuryPostId' });
   }
   const handle = twitterHandle || 'MaddenAcademy_';
-  const maxWaitMs = (maxWaitSeconds || 300) * 1000;
+  const maxWaitMs = (maxWaitSeconds === 0 ? 0 : (maxWaitSeconds || 300)) * 1000;
 
   if (!hypefuryToken || Date.now() > tokenExpiry) {
     await refreshHypefuryToken();
@@ -1133,7 +1133,7 @@ app.post('/get-thread-tweet-url', async (req, res) => {
   let attempts = 0;
 
   try {
-    while (Date.now() - startedAt < maxWaitMs) {
+    do {
       attempts++;
       const r = await axios.get(url, {
         headers: { Authorization: `Bearer ${hypefuryToken}` },
@@ -1192,8 +1192,10 @@ app.post('/get-thread-tweet-url', async (req, res) => {
         console.log(`[get-thread-tweet-url] Attempt ${attempts}: HTTP ${r.status}`);
       }
 
+      // Wait 15s before retrying (skip wait if maxWaitMs is 0)
+      if (maxWaitMs === 0) break;
       await new Promise(r => setTimeout(r, 15000));
-    }
+    } while (Date.now() - startedAt < maxWaitMs);
 
     return res.status(408).json({
       success: false,
