@@ -845,6 +845,107 @@ function buildYouTubeText(thread) {
   return parts.join('\n\n─────────────────\n\n');
 }
 
+// ─── Google Sheets helpers (service account) ──────────────────────────────
+const SHEET_ID = '1WVS2Xg2XSnjCgpFSrJxRBH3N7uddVSLwofgs5UF_XXU';
+const SHEET_NAME = 'Sheet1';
+
+let sheetsAccessToken = null;
+let sheetsTokenExpiry = 0;
+
+async function getSheetsAccessToken() {
+  if (sheetsAccessToken && Date.now() < sheetsTokenExpiry) {
+    return sheetsAccessToken;
+  }
+  const sa = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  const now = Math.floor(Date.now() / 1000);
+
+  const b64url = (str) => Buffer.from(str).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+  const header = b64url(JSON.stringify({ alg: 'RS256', typ: 'JWT' }));
+  const payload = b64url(JSON.stringify({
+    iss: sa.client_email,
+    scope: 'https://www.googleapis.com/auth/spreadsheets',
+    aud: 'https://oauth2.googleapis.com/token',
+    iat: now,
+    exp: now + 3600,
+  }));
+
+  const signable = `${header}.${payload}`;
+  const sign = crypto.createSign('RSA-SHA256');
+  sign.update(signable);
+  const signature = sign.sign(sa.private_key).toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+
+  const jwt = `${signable}.${signature}`;
+
+  const res = await axios.post('https://oauth2.googleapis.com/token', 
+    `grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion=${jwt}`,
+    { headers: { 'Content-Type': 'application/x-www-form-urlencoded' } }
+  );
+
+  sheetsAccessToken = res.data.access_token;
+  sheetsTokenExpiry = Date.now() + (res.data.expires_in - 60) * 1000;
+  console.log('[sheets] Access token refreshed');
+  return sheetsAccessToken;
+}
+
+async function readSheet() {
+  const token = await getSheetsAccessToken();
+  const res = await axios.get(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_NAME}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const rows = res.data.values || [];
+  if (rows.length < 2) return [];
+  const headers = rows[0];
+  return rows.slice(1).map((row, idx) => {
+    const obj = { _rowIndex: idx + 2 };
+    headers.forEach((h, i) => { obj[h] = row[i] || ''; });
+    return obj;
+  });
+}
+
+async function updateSheetRow(rowIndex, updates) {
+  const token = await getSheetsAccessToken();
+
+  const headersRes = await axios.get(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values/${SHEET_NAME}!1:1`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const headers = headersRes.data.values?.[0] || [];
+
+  const data = [];
+  for (const [key, value] of Object.entries(updates)) {
+    const colIdx = headers.indexOf(key);
+    if (colIdx === -1) {
+      console.warn(`[sheets] Column "${key}" not found, skipping`);
+      continue;
+    }
+    let col;
+    if (colIdx < 26) {
+      col = String.fromCharCode(65 + colIdx);
+    } else {
+      col = String.fromCharCode(64 + Math.floor(colIdx / 26)) + String.fromCharCode(65 + (colIdx % 26));
+    }
+    data.push({
+      range: `${SHEET_NAME}!${col}${rowIndex}`,
+      values: [[value]],
+    });
+  }
+
+  if (data.length === 0) return;
+
+  await axios.post(
+    `https://sheets.googleapis.com/v4/spreadsheets/${SHEET_ID}/values:batchUpdate`,
+    { valueInputOption: 'RAW', data },
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+}
+
+async function findSheetRow(columnName, value) {
+  const rows = await readSheet();
+  return rows.find(r => r[columnName] === value) || null;
+}
+
 // ─── Launch Puppeteer browser ──────────────────────────────────────────────
 async function launchBrowser() {
   return puppeteer.launch({
@@ -1846,17 +1947,15 @@ app.post('/get-latest-tweet', async (req, res) => {
 });
 
 // ─── /opusclip-webhook ────────────────────────────────────────────────────
-// Receives webhook from OpusClip when clips are ready
-// Stores clip data and notifies n8n via webhook URL
+// Receives webhook from OpusClip when clips are ready.
+// Sorts clips by score, stores top 3 URLs in the sheet, sets clipsReady.
 app.post('/opusclip-webhook', async (req, res) => {
   const payload = req.body;
-  // Log full payload to understand structure
   console.log('[opusclip] Full payload:', JSON.stringify(payload, null, 2).substring(0, 1000));
 
   res.json({ success: true });
 
   try {
-    // OpusClip uses "stage" for status and clips are nested under exportableClips or similar
     const stage = payload?.stage || payload?.data?.stage;
     const projectId = payload?.id || payload?.data?.id;
     const clips = payload?.clips || payload?.data?.clips || 
@@ -1864,7 +1963,6 @@ app.post('/opusclip-webhook', async (req, res) => {
                   payload?.highlightClips || payload?.data?.highlightClips || [];
 
     console.log(`[opusclip] projectId: ${projectId}, stage: ${stage}, clips: ${clips.length}`);
-    console.log(`[opusclip] Full keys: ${Object.keys(payload).join(', ')}`);
 
     if (stage !== 'COMPLETE' && stage !== 'complete' && stage !== 'completed' && stage !== 'done') {
       console.log(`[opusclip] Project ${projectId} stage: ${stage} — not complete yet`);
@@ -1886,9 +1984,6 @@ app.post('/opusclip-webhook', async (req, res) => {
         );
         finalClips = clipsRes.data?.data || clipsRes.data?.clips || clipsRes.data || [];
         console.log(`[opusclip] Fetched ${finalClips.length} clips via API`);
-        console.log(`[opusclip] First clip sample: ${JSON.stringify(finalClips[0] || {}).substring(0, 300)}`);
-        console.log(`[opusclip] First clip ALL keys: ${JSON.stringify(Object.keys(finalClips[0] || {}))}`);
-        console.log(`[opusclip] First clip full: ${JSON.stringify(finalClips[0] || {})}`);
       } catch (e) {
         console.error(`[opusclip] Failed to fetch clips:`, e.message);
       }
@@ -1896,21 +1991,38 @@ app.post('/opusclip-webhook', async (req, res) => {
 
     console.log(`[opusclip] Project ${projectId} completed with ${finalClips.length} clips`);
 
-    // Forward to n8n webhook for Discord approval flow
-    const n8nWebhookUrl = process.env.N8N_OPUSCLIP_WEBHOOK_URL;
-    if (n8nWebhookUrl && finalClips.length > 0) {
-      await axios.post(n8nWebhookUrl, {
-        projectId,
-        driveFileId: payload?.driveFileId || '',
-        clips: finalClips.slice(0, 3).map((clip, i) => ({
-          index: i + 1,
-          url: clip.uriForPreview || clip.stream_url || clip.download_url || clip.url,
-          duration: clip.duration || clip.clipDuration,
-          score: clip.viralScore || clip.score,
-          thumbnail: clip.thumbnailUrl || clip.thumbnail_url,
-        })),
+    if (finalClips.length === 0) {
+      console.log('[opusclip] No clips to store');
+      return;
+    }
+
+    // Sort by score (highest first), take top 3
+    const sorted = [...finalClips].sort((a, b) => {
+      const scoreA = a.score || a.viralScore || 0;
+      const scoreB = b.score || b.viralScore || 0;
+      return scoreB - scoreA;
+    });
+    const top3 = sorted.slice(0, 3);
+
+    const clipData = top3.map((clip, i) => ({
+      index: i + 1,
+      url: clip.uriForPreview || clip.stream_url || clip.download_url || clip.url,
+      score: clip.score || clip.viralScore || 0,
+      duration: clip.durationMs || clip.duration || clip.clipDuration || 0,
+    }));
+
+    console.log(`[opusclip] Top 3 clips by score: ${clipData.map(c => c.score).join(', ')}`);
+
+    // Store in the sheet — find row by projectId
+    const row = await findSheetRow('projectId', projectId);
+    if (row) {
+      await updateSheetRow(row._rowIndex, {
+        clipUrls: JSON.stringify(clipData),
+        clipsReady: 'true',
       });
-      console.log(`[opusclip] Forwarded ${Math.min(finalClips.length, 3)} clips to n8n`);
+      console.log(`[opusclip] Stored ${clipData.length} clips in sheet row ${row._rowIndex}`);
+    } else {
+      console.warn(`[opusclip] No sheet row found for projectId ${projectId} — clips not stored`);
     }
 
   } catch (err) {
@@ -2091,6 +2203,15 @@ app.get('/test-twitter-auth', async (req, res) => {
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok', tokenValid: !!hypefuryToken && Date.now() < tokenExpiry }));
+
+app.get('/test-sheets', async (req, res) => {
+  try {
+    const rows = await readSheet();
+    res.json({ success: true, rowCount: rows.length, firstRow: rows[0] || null });
+  } catch (err) {
+    res.status(500).json({ error: err.response?.data || err.message });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Twitter video server running on port ${PORT}`);
