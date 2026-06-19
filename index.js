@@ -745,80 +745,7 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
     thumbnail: thumbnailName,
   };
 }
-// ─── YouTube Community Post helpers ───────────────────────────────────────
-function generateSAPISIDHASH() {
-  const sapisid = process.env.YT_SAPISID;
-  const origin = process.env.YT_ORIGIN || 'https://www.youtube.com';
-  const timestamp = Math.floor(Date.now() / 1000);
-  const hash = require('crypto')
-    .createHash('sha1')
-    .update(`${timestamp} ${sapisid} ${origin}`)
-    .digest('hex');
-  const result = `SAPISIDHASH ${timestamp}_${hash}`;
-  console.log(`[youtube] SAPISID length: ${(sapisid || '').length}`);
-  console.log(`[youtube] Generated auth: SAPISIDHASH ${timestamp}_${hash.substring(0, 10)}...`);
-  return result;
-}
 
-async function postYouTubeCommunityPost(text) {
-  const cookie = process.env.YT_SESSION_COOKIE;
-  const authUser = process.env.YT_AUTH_USER || '2';
-  const origin = process.env.YT_ORIGIN || 'https://www.youtube.com';
-
-  const payload = {
-    context: {
-      client: {
-        hl: 'en',
-        gl: 'PH',
-        clientName: 'WEB',
-        clientVersion: '2.20260603.05.00',
-        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36,gzip(gfe)',
-        originalUrl: 'https://www.youtube.com/@themaddenacademy6591/posts',
-        platform: 'DESKTOP',
-        visitorData: process.env.YT_VISITOR_ID || '',
-        clientFormFactor: 'UNKNOWN_FORM_FACTOR',
-        timeZone: 'Asia/Manila',
-        browserName: 'Chrome',
-        browserVersion: '148.0.0.0',
-        utcOffsetMinutes: 480,
-      },
-      user: { lockedSafetyMode: false },
-      request: {
-        useSsl: true,
-        consistencyTokenJars: process.env.YT_CONSISTENCY_TOKEN ? [{
-          encryptedTokenJarContents: process.env.YT_CONSISTENCY_TOKEN,
-        }] : [],
-      },
-    },
-    createBackstagePostParams: 'ChhVQ2xWRHlRYVIyWllZMXNQb3dPdXhOdEEQATICGAhKAggC',
-    commentText: text,
-  };
-
-  const res = await axios.post(
-    'https://www.youtube.com/youtubei/v1/backstage/create_post?prettyPrint=false',
-    payload,
-    {
-      headers: {
-        'Authorization': generateSAPISIDHASH(),
-        'Content-Type': 'application/json',
-        'Cookie': cookie,
-        'X-Goog-AuthUser': authUser,
-        'X-Origin': origin,
-        'X-Goog-Visitor-Id': process.env.YT_VISITOR_ID || '',
-        'X-Youtube-Client-Name': '1',
-        'X-Youtube-Client-Version': '2.20260603.05.00',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        'Origin': origin,
-        'Referer': 'https://www.youtube.com/@themaddenacademy6591/posts',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-      },
-      validateStatus: () => true,
-    }
-  );
-
-  return { status: res.status, data: res.data };
-}
 
 function buildYouTubeText(thread) {
   const parts = [];
@@ -944,6 +871,448 @@ async function updateSheetRow(rowIndex, updates) {
 async function findSheetRow(columnName, value) {
   const rows = await readSheet();
   return rows.find(r => r[columnName] === value) || null;
+}
+
+// ─── Drip Quote Tweet Engine ──────────────────────────────────────────────
+// Manages the timed drip chain: promo → clip1 → clip2 → clip3 → full video
+
+const activeDrips = new Map(); // driveFileId → timeout reference (for cleanup)
+
+const DRIP_DELAYS = {
+  promo:     20 * 60 * 1000,   // 20 min after publish
+  clip1:     30 * 60 * 1000,   // 30 min after promo
+  clip2:     60 * 60 * 1000,   // 1 hr after clip1
+  clip3:     60 * 60 * 1000,   // 1 hr after clip2
+  fullvideo: 60 * 60 * 1000,   // 1 hr after clip3
+};
+
+const DRIP_ORDER = ['promo', 'clip1', 'clip2', 'clip3', 'fullvideo', 'done'];
+
+function nextStage(current) {
+  const idx = DRIP_ORDER.indexOf(current);
+  return idx >= 0 && idx < DRIP_ORDER.length - 1 ? DRIP_ORDER[idx + 1] : null;
+}
+
+async function executeDripStep(driveFileId, stage) {
+  try {
+    // Re-read the sheet to check for cancellation
+    const row = await findSheetRow('driveFileId', driveFileId);
+    if (!row) {
+      console.log(`[drip] Row not found for ${driveFileId} — stopping`);
+      activeDrips.delete(driveFileId);
+      return;
+    }
+    if (row.dripStage === 'done') {
+      console.log(`[drip] Drip cancelled for ${driveFileId} — stage is 'done'`);
+      activeDrips.delete(driveFileId);
+      return;
+    }
+
+    const quoteTweetData = JSON.parse(row.quoteTweetDataJson || '{}');
+    const clipData = JSON.parse(row.clipUrls || '[]');
+    const title = (quoteTweetData.text || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
+
+    console.log(`[drip] Executing stage "${stage}" for ${driveFileId}`);
+
+    if (stage === 'promo') {
+      // Promo QT: title + "Follow @MaddenAcademy_ for full reveal" + 4 images from hook
+      await postPromoQuoteTweet(row, quoteTweetData, title);
+
+      // Also: rename Drive file + notify editor (merged from old workflow)
+      try {
+        await renameDriveFile(row.driveFileId, title);
+        await notifyEditorDiscord(title, row.driveFileId);
+        console.log(`[drip] Drive renamed + editor notified for ${driveFileId}`);
+      } catch (e) {
+        console.error(`[drip] Rename/notify failed (non-fatal):`, e.message);
+      }
+
+    } else if (stage.startsWith('clip')) {
+      const clipIndex = parseInt(stage.replace('clip', '')) - 1;
+      if (clipData[clipIndex]) {
+        const clipUrl = clipData[clipIndex].url;
+        const commentText = `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+        await postClipQuoteTweet(clipUrl, quoteTweetData, commentText);
+      } else {
+        console.log(`[drip] No clip at index ${clipIndex} — skipping ${stage}`);
+      }
+
+    } else if (stage === 'fullvideo') {
+      const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
+      const commentText = `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
+      await postClipQuoteTweet(driveUrl, quoteTweetData, commentText);
+    }
+
+    // Move to next stage
+    const next = nextStage(stage);
+    if (next && next !== 'done') {
+      const delay = DRIP_DELAYS[next];
+      const nextTime = new Date(Date.now() + delay).toISOString();
+      await updateSheetRow(row._rowIndex, {
+        dripStage: stage,
+        nextDripAt: nextTime,
+      });
+      console.log(`[drip] Next stage "${next}" scheduled at ${nextTime}`);
+      scheduleDripStep(driveFileId, next, delay);
+    } else {
+      await updateSheetRow(row._rowIndex, {
+        dripStage: 'done',
+        nextDripAt: '',
+      });
+      activeDrips.delete(driveFileId);
+      console.log(`[drip] Drip complete for ${driveFileId}`);
+    }
+
+  } catch (err) {
+    console.error(`[drip] Error in stage "${stage}" for ${driveFileId}:`, err.message);
+    // Don't stop the chain — schedule the next step anyway so one failure doesn't kill the whole drip
+    try {
+      const next = nextStage(stage);
+      if (next && next !== 'done') {
+        const delay = DRIP_DELAYS[next];
+        scheduleDripStep(driveFileId, next, delay);
+      }
+    } catch (e) {
+      console.error(`[drip] Failed to schedule next step:`, e.message);
+    }
+  }
+}
+
+function scheduleDripStep(driveFileId, stage, delayMs) {
+  const timer = setTimeout(() => executeDripStep(driveFileId, stage), delayMs);
+  activeDrips.set(driveFileId, { stage, timer });
+  console.log(`[drip] Scheduled "${stage}" for ${driveFileId} in ${Math.round(delayMs / 60000)} min`);
+}
+
+function startDripChain(driveFileId) {
+  if (activeDrips.has(driveFileId)) {
+    console.log(`[drip] Drip already active for ${driveFileId} — skipping`);
+    return;
+  }
+  const delay = DRIP_DELAYS.promo;
+  console.log(`[drip] Starting drip chain for ${driveFileId}`);
+  scheduleDripStep(driveFileId, 'promo', delay);
+}
+
+async function tryStartDrip(driveFileId) {
+  // Check if both conditions are met: clips ready AND thread published
+  const row = await findSheetRow('driveFileId', driveFileId);
+  if (!row) return;
+  if (row.clipsReady === 'true' && row.threadPublished === 'true' && row.dripStage !== 'done' && !activeDrips.has(driveFileId)) {
+    startDripChain(driveFileId);
+  }
+}
+
+// ─── Helper: post promo quote tweet (title + 4 images) ───────────────────
+async function postPromoQuoteTweet(row, quoteTweetData, title) {
+  // Get the thread doc from Firestore to find the hook tweet's images
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const token = hypefuryToken;
+
+  const firestoreUrl = `https://firestore.googleapis.com/v1/projects/hypefury-896c7/databases/(default)/documents/threads/${row.hypefuryPostId}`;
+  const docRes = await axios.get(firestoreUrl, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+
+  // Get hook tweet's media (first tweet, index 0)
+  const tweetsArr = docRes.data?.fields?.tweets?.arrayValue?.values || [];
+  const hookMedia = tweetsArr[0]?.mapValue?.fields?.media?.arrayValue?.values || [];
+  const imageNames = hookMedia.slice(0, 4).map(m => m.mapValue?.fields?.name?.stringValue).filter(Boolean);
+
+  console.log(`[drip-promo] Found ${imageNames.length} hook images`);
+
+  // Download each image from Hypefury Firebase Storage and re-upload for Manu's account
+  const bucket = 'hypefury-896c7.appspot.com';
+  const uploadedMedia = [];
+
+  for (const imgName of imageNames) {
+    try {
+      const encodedName = encodeURIComponent(imgName);
+      const imgUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodedName}?alt=media`;
+      const tmpImg = path.join('/tmp', `promo_${Date.now()}_${uuidv4()}.png`);
+
+      const dl = await axios.get(imgUrl, {
+        responseType: 'arraybuffer',
+        timeout: 30000,
+        headers: { Authorization: `Firebase ${token}` },
+      });
+      fs.writeFileSync(tmpImg, dl.data);
+
+      const media = await uploadImageToHypefury(tmpImg, token);
+      try { fs.unlinkSync(tmpImg); } catch (e) {}
+
+      if (media) uploadedMedia.push(media);
+    } catch (e) {
+      console.error(`[drip-promo] Failed to process image ${imgName}:`, e.message);
+    }
+  }
+
+  console.log(`[drip-promo] Uploaded ${uploadedMedia.length} images for Manu's promo tweet`);
+
+  // Build the promo tweet
+  const userId = 'Jc9SLRhASBPPGTA6CK53BOOUTeW2'; // Manu's account
+  const status = `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+
+  const payload = {
+    currentUserId: userId,
+    post: {
+      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+      slotType: 'post',
+      time: new Date().toISOString(),
+      scheduled: false,
+      user: userId,
+      publishingError: null,
+      deleted: false,
+      tweets: [{
+        status,
+        count: 0,
+        media: uploadedMedia,
+        guid: uuidv4(),
+        published: false,
+        quoteTweetData,
+      }],
+      lastAutoRTTime: null,
+      isFavorite: false,
+      type: 'post',
+      tweetIds: null,
+      conditionalRetweetsConditions: { delayForRetweet: '1 hour', minRetweetsThreshold: null, minFavoritesThreshold: 5 },
+      autoplug: { processed: false, minRetweets: null, minFavorites: 0, templateName: null, status: '' },
+      postNow: true,
+      source: null,
+      writer: null,
+      growthProgram: null,
+      tweetshot: null,
+      shareOnInstagram: false,
+      linkedIn: null,
+      facebook: null,
+      delayBetweenTweets: null,
+      tweetMetricsUpdatedAt: null,
+      categories: [],
+      recurrentPostRef: null,
+      replyToTweetId: null,
+      replyToTweetInfo: null,
+      isCancelled: false,
+      tweetsCount: 1,
+      isCloned: false,
+      isRecurrentPost: false,
+      timerData: null,
+      isPinned: false,
+      ghostwritingRefusal: null,
+      ghostwritingStatus: null,
+      impressionsCountOfTheFirstTweet: null,
+      tweetshotContent: null,
+      instagramPublishingError: null,
+      facebookPublishingError: null,
+      publishedToInstagram: false,
+      autoDM: null,
+      hasThreadFinisherTweet: false,
+      created_at: null,
+      linkedInPublishingError: null,
+      isRecurrentPostDisabled: false,
+      instagramThreadFinisherText: null,
+      lastClonePostedTime: null,
+      isDeletedFromTwitter: false,
+      isLongTweetshot: true,
+      isLargeFontTweetshot: false,
+      tweetReel: null,
+      tiktok: null,
+      ama: null,
+      youtubeShortRef: null,
+      threads: null,
+      tiktokPublishingError: null,
+    },
+  };
+
+  const response = await axios.post('https://app.hypefury.com/api/posts/save', payload, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Origin': 'https://app.hypefury.com',
+      'Referer': 'https://app.hypefury.com/queue',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    },
+  });
+
+  console.log(`[drip-promo] Promo tweet posted:`, response.data);
+}
+
+// ─── Helper: post clip or full-video quote tweet ─────────────────────────
+async function postClipQuoteTweet(videoUrl, quoteTweetData, commentText) {
+  // Reuse the existing /quote-tweet-hypefury logic internally
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const token = hypefuryToken;
+  const userId = 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+
+  const tmpVideo = path.join('/tmp', `drip_${Date.now()}_${uuidv4()}.mp4`);
+
+  const dl = await axios.get(videoUrl, {
+    responseType: 'stream',
+    timeout: 300000,
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+  });
+  const writer = fs.createWriteStream(tmpVideo);
+  await new Promise((resolve, reject) => {
+    dl.data.pipe(writer);
+    writer.on('finish', resolve);
+    writer.on('error', reject);
+  });
+
+  const videoSize = fs.statSync(tmpVideo).size;
+  console.log(`[drip-clip] Downloaded: ${(videoSize / 1024 / 1024).toFixed(1)}MB`);
+
+  if (videoSize < 100 * 1024) {
+    try { fs.unlinkSync(tmpVideo); } catch (e) {}
+    throw new Error(`Video too small (${videoSize} bytes)`);
+  }
+
+  const videoMedia = await uploadVideoToHypefury(tmpVideo, token);
+  try { fs.unlinkSync(tmpVideo); } catch (e) {}
+
+  const status = commentText || '';
+
+  const payload = {
+    currentUserId: userId,
+    post: {
+      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+      slotType: 'post',
+      time: new Date().toISOString(),
+      scheduled: false,
+      user: userId,
+      publishingError: null,
+      deleted: false,
+      tweets: [{
+        status,
+        count: 0,
+        media: [videoMedia],
+        guid: uuidv4(),
+        published: false,
+        quoteTweetData,
+      }],
+      lastAutoRTTime: null,
+      isFavorite: false,
+      type: 'post',
+      tweetIds: null,
+      conditionalRetweetsConditions: { delayForRetweet: '1 hour', minRetweetsThreshold: null, minFavoritesThreshold: 5 },
+      autoplug: { processed: false, minRetweets: null, minFavorites: 0, templateName: null, status: '' },
+      postNow: true,
+      source: null,
+      writer: null,
+      growthProgram: null,
+      tweetshot: null,
+      shareOnInstagram: false,
+      linkedIn: null,
+      facebook: null,
+      delayBetweenTweets: null,
+      tweetMetricsUpdatedAt: null,
+      categories: [],
+      recurrentPostRef: null,
+      replyToTweetId: null,
+      replyToTweetInfo: null,
+      isCancelled: false,
+      tweetsCount: 1,
+      isCloned: false,
+      isRecurrentPost: false,
+      timerData: null,
+      isPinned: false,
+      ghostwritingRefusal: null,
+      ghostwritingStatus: null,
+      impressionsCountOfTheFirstTweet: null,
+      tweetshotContent: null,
+      instagramPublishingError: null,
+      facebookPublishingError: null,
+      publishedToInstagram: false,
+      autoDM: null,
+      hasThreadFinisherTweet: false,
+      created_at: null,
+      linkedInPublishingError: null,
+      isRecurrentPostDisabled: false,
+      instagramThreadFinisherText: null,
+      lastClonePostedTime: null,
+      isDeletedFromTwitter: false,
+      isLongTweetshot: true,
+      isLargeFontTweetshot: false,
+      tweetReel: null,
+      tiktok: null,
+      ama: null,
+      youtubeShortRef: null,
+      threads: null,
+      tiktokPublishingError: null,
+    },
+  };
+
+  const response = await axios.post('https://app.hypefury.com/api/posts/save', payload, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      'Origin': 'https://app.hypefury.com',
+      'Referer': 'https://app.hypefury.com/queue',
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+    },
+  });
+
+  console.log(`[drip-clip] Quote tweet posted:`, response.data);
+}
+
+// ─── Helper: rename Drive file ───────────────────────────────────────────
+async function renameDriveFile(driveFileId, title) {
+  const safeTitle = title.replace(/[\\/:*?"<>|]/g, '').trim();
+  const token = await getSheetsAccessToken(); // reuses the service account
+
+  // Get current filename for extension
+  const fileRes = await axios.get(
+    `https://www.googleapis.com/drive/v3/files/${driveFileId}`,
+    { headers: { Authorization: `Bearer ${token}` } }
+  );
+  const oldName = fileRes.data?.name || '';
+  const dot = oldName.lastIndexOf('.');
+  const ext = dot > 0 ? oldName.substring(dot) : '';
+
+  await axios.patch(
+    `https://www.googleapis.com/drive/v3/files/${driveFileId}`,
+    { name: safeTitle + ext },
+    { headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' } }
+  );
+  console.log(`[drip] Drive file renamed to: ${safeTitle}${ext}`);
+}
+
+// ─── Helper: notify editor in Discord ────────────────────────────────────
+async function notifyEditorDiscord(title, driveFileId) {
+  const link = `https://drive.google.com/file/d/${driveFileId}/view`;
+  const content = `<@752357571255337052> 🎬 **New video posted!**\n\n**Title:** ${title}\n**Video:** ${link}`;
+
+  await axios.post(
+    'https://discord.com/api/webhooks/1503693545096085545/pMM4YNo_TKtM4pqZBnmisgBx2Mox1lp5qxR1e8kwbV81ZSf5D0JRw7jv7ADl8LLD29j9',
+    { content },
+    { headers: { 'Content-Type': 'application/json' } }
+  );
+}
+
+// ─── Startup recovery: resume in-progress drips ──────────────────────────
+async function resumeDrips() {
+  try {
+    const rows = await readSheet();
+    const now = Date.now();
+
+    for (const row of rows) {
+      if (!row.dripStage || row.dripStage === 'done' || row.dripStage === 'waiting') continue;
+      if (activeDrips.has(row.driveFileId)) continue;
+
+      // Find the next stage to execute
+      const currentIdx = DRIP_ORDER.indexOf(row.dripStage);
+      const nextStageVal = currentIdx >= 0 ? DRIP_ORDER[currentIdx + 1] : null;
+      if (!nextStageVal || nextStageVal === 'done') continue;
+
+      // Calculate delay: if nextDripAt is in the past, execute soon; otherwise wait
+      const nextTime = row.nextDripAt ? Date.parse(row.nextDripAt) : 0;
+      const delay = Math.max(nextTime - now, 5000); // at least 5s to let server fully start
+
+      console.log(`[drip-recovery] Resuming ${row.driveFileId} at stage "${nextStageVal}" in ${Math.round(delay / 60000)} min`);
+      scheduleDripStep(row.driveFileId, nextStageVal, delay);
+    }
+  } catch (err) {
+    console.error('[drip-recovery] Error:', err.message);
+  }
 }
 
 // ─── Launch Puppeteer browser ──────────────────────────────────────────────
@@ -1497,47 +1866,82 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
   }
 });
 
-// ─── /post-to-youtube-community ───────────────────────────────────────────
-app.post('/post-to-youtube-community', async (req, res) => {
-  const { thread } = req.body;
+// ─── /watch-for-publish ───────────────────────────────────────────────────
+// Called by n8n after /post-thread. Polls Firestore in the background until
+// the thread publishes, then stores the tweet data and triggers the drip.
+app.post('/watch-for-publish', async (req, res) => {
+  const { hypefuryPostId, driveFileId } = req.body;
 
-  if (!thread) return res.status(400).json({ error: 'Missing thread' });
-
-  if (!process.env.YT_SESSION_COOKIE || !process.env.YT_SAPISID) {
-    return res.status(500).json({ error: 'YouTube session credentials not configured' });
+  if (!hypefuryPostId || !driveFileId) {
+    return res.status(400).json({ error: 'Missing hypefuryPostId or driveFileId' });
   }
 
-  try {
-    const text = buildYouTubeText(thread);
-    console.log(`[youtube] Post text built (${text.length} chars)`);
+  res.json({ success: true, message: 'Watching for publish...' });
 
-    console.log('[youtube] Posting to TMA YouTube Community...');
-    const result = await postYouTubeCommunityPost(text);
+  // Background polling — doesn't block the HTTP response
+  (async () => {
+    const maxWaitMs = 2 * 60 * 60 * 1000; // 2 hours max
+    const pollInterval = 30 * 1000; // 30 seconds
+    const startedAt = Date.now();
+    const handle = 'MaddenAcademy_';
 
-    console.log(`[youtube] Response: HTTP ${result.status}`);
+    console.log(`[watch] Watching thread ${hypefuryPostId} for publish...`);
 
-    if (result.status === 200 || result.status === 201) {
-      const postId = result.data?.postId || result.data?.backstagePostId || null;
-      console.log('[youtube] Posted successfully:', postId);
-      return res.json({
-        success: true,
-        postId,
-        postUrl: postId ? `https://www.youtube.com/post/${postId}` : null,
-      });
-    } else {
-      console.error('[youtube] Failed:', result.status, JSON.stringify(result.data));
-      return res.status(result.status).json({
-        success: false,
-        error: result.data,
-      });
+    while (Date.now() - startedAt < maxWaitMs) {
+      try {
+        if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+
+        const url = `https://firestore.googleapis.com/v1/projects/hypefury-896c7/databases/(default)/documents/threads/${hypefuryPostId}`;
+        const r = await axios.get(url, {
+          headers: { Authorization: `Bearer ${hypefuryToken}` },
+          validateStatus: () => true,
+        });
+
+        if (r.status === 200) {
+          const values = r.data?.fields?.tweetIds?.arrayValue?.values || [];
+          const firstId = values[0]?.stringValue;
+
+          if (firstId) {
+            const tweetUrl = `https://x.com/${handle}/status/${firstId}`;
+            console.log(`[watch] Thread published: ${tweetUrl}`);
+
+            // Extract first tweet text for quoteTweetData
+            const tweetsArr = r.data?.fields?.tweets?.arrayValue?.values || [];
+            const firstTweetText = tweetsArr[0]?.mapValue?.fields?.status?.stringValue || '';
+
+            const quoteTweetData = {
+              text: firstTweetText,
+              userProfilePictureURL: 'https://pbs.twimg.com/profile_images/1683535076552785925/NW4iUAkc_normal.jpg',
+              userDisplayName: 'TheMaddenAcademy',
+              username: handle,
+              tweetId: firstId,
+              url: tweetUrl,
+            };
+
+            // Update the sheet
+            const row = await findSheetRow('driveFileId', driveFileId);
+            if (row) {
+              await updateSheetRow(row._rowIndex, {
+                threadPublished: 'true',
+                quoteTweetDataJson: JSON.stringify(quoteTweetData),
+              });
+              console.log(`[watch] Sheet updated for ${driveFileId}`);
+
+              // Try to start drip (if clips are also ready)
+              await tryStartDrip(driveFileId);
+            }
+            return; // done watching
+          }
+        }
+      } catch (err) {
+        console.error(`[watch] Poll error:`, err.message);
+      }
+
+      await new Promise(r => setTimeout(r, pollInterval));
     }
-  } catch (err) {
-    console.error('[youtube] Error:', err.response?.data || err.message);
-    return res.status(500).json({
-      success: false,
-      error: err.response?.data || err.message,
-    });
-  }
+
+    console.log(`[watch] Timed out after 2 hours for ${hypefuryPostId}`);
+  })();
 });
 
 // ─── /extract-screenshots ─────────────────────────────────────────────────
@@ -2021,6 +2425,8 @@ app.post('/opusclip-webhook', async (req, res) => {
         clipsReady: 'true',
       });
       console.log(`[opusclip] Stored ${clipData.length} clips in sheet row ${row._rowIndex}`);
+                  // Check if thread is also published — if so, start the drip
+      await tryStartDrip(row.driveFileId);
     } else {
       console.warn(`[opusclip] No sheet row found for projectId ${projectId} — clips not stored`);
     }
@@ -2216,4 +2622,6 @@ app.get('/test-sheets', async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Twitter video server running on port ${PORT}`);
   refreshHypefuryToken();
+  // Resume any in-progress drips after restart
+  setTimeout(() => resumeDrips(), 10000); // wait 10s for token to be ready
 });
