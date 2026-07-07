@@ -1123,12 +1123,12 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
     },
   };
 
-  const response = await axios.post('https://app.hypefury.com/api/posts/save', payload, {
+  const response = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'Origin': 'https://app.hypefury.com',
-      'Referer': 'https://app.hypefury.com/queue',
+      'Origin': 'https://app.aerielab.co',
+      'Referer': 'https://app.aerielab.co/queue',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     },
   });
@@ -1241,12 +1241,12 @@ async function postClipQuoteTweet(videoUrl, quoteTweetData, commentText) {
     },
   };
 
-  const response = await axios.post('https://app.hypefury.com/api/posts/save', payload, {
+  const response = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
     headers: {
       'Authorization': `Bearer ${token}`,
       'Content-Type': 'application/json',
-      'Origin': 'https://app.hypefury.com',
-      'Referer': 'https://app.hypefury.com/queue',
+      'Origin': 'https://app.aerielab.co',
+      'Referer': 'https://app.aerielab.co/queue',
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
     },
   });
@@ -1549,14 +1549,14 @@ app.post('/post-thread', async (req, res) => {
     console.log(`[post-thread] Posting thread with ${tweets.length} tweets to Hypefury...`);
 
     const response = await axios.post(
-      'https://app.hypefury.com/api/posts/save',
+      'https://app.aerielab.co/api/posts/save',
       payload,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'Origin': 'https://app.hypefury.com',
-          'Referer': 'https://app.hypefury.com/queue',
+          'Origin': 'https://app.aerielab.co',
+          'Referer': 'https://app.aerielab.co/queue',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
         },
       }
@@ -1834,14 +1834,14 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
     // ── Step 4: POST to Hypefury ───────────────────────────────────────────
     console.log(`[quote-tweet-hypefury] Posting quote tweet to Hypefury (account ${userId})...`);
     const response = await axios.post(
-      'https://app.hypefury.com/api/posts/save',
+      'https://app.aerielab.co/api/posts/save',
       payload,
       {
         headers: {
           'Authorization': `Bearer ${token}`,
           'Content-Type': 'application/json',
-          'Origin': 'https://app.hypefury.com',
-          'Referer': 'https://app.hypefury.com/queue',
+          'Origin': 'https://app.aerielab.co',
+          'Referer': 'https://app.aerielab.co/queue',
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
         },
       }
