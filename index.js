@@ -586,7 +586,7 @@ async function uploadImageToHypefury(imagePath, jwtToken) {
   const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
 const fileName = `${userId}/${imageId}.png`;
 const thumbnailName = `${userId}/thumbnail-${imageId}.png`;
-  const bucket = 'hypefury-896c7.appspot.com';
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
   const fileBuffer = fs.readFileSync(imagePath);
   const fileSize = fileBuffer.length;
@@ -662,7 +662,7 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
   const videoId = uuidv4();
   const fileName = `${videoId}.mp4`;
   const thumbnailName = `thumbnail-${videoId}.png`;
-  const bucket = 'hypefury-896c7.appspot.com';
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
 
   const videoBuffer = fs.readFileSync(videoPath);
@@ -1009,7 +1009,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
 
-  const firestoreUrl = `https://firestore.googleapis.com/v1/projects/hypefury-896c7/databases/(default)/documents/threads/${row.hypefuryPostId}`;
+  const firestoreUrl = `https://firestore.googleapis.com/v1/projects/${process.env.HF_FIREBASE_PROJECT || 'hypefury-896c7'}/databases/(default)/documents/threads/${row.hypefuryPostId}`;
   const docRes = await axios.get(firestoreUrl, {
     headers: { Authorization: `Bearer ${token}` },
   });
@@ -1022,7 +1022,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
   console.log(`[drip-promo] Found ${imageNames.length} hook images`);
 
   // Download each image from Hypefury Firebase Storage and re-upload for Manu's account
-  const bucket = 'hypefury-896c7.appspot.com';
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
   const uploadedMedia = [];
 
   for (const imgName of imageNames) {
@@ -1598,7 +1598,7 @@ app.post('/get-thread-tweet-url', async (req, res) => {
     return res.status(401).json({ error: 'No Hypefury token available' });
   }
 
-  const url = `https://firestore.googleapis.com/v1/projects/hypefury-896c7/databases/(default)/documents/threads/${hypefuryPostId}`;
+  const url = `https://firestore.googleapis.com/v1/projects/${process.env.HF_FIREBASE_PROJECT || 'hypefury-896c7'}/databases/(default)/documents/threads/${hypefuryPostId}`;
   const startedAt = Date.now();
   let attempts = 0;
 
@@ -1891,7 +1891,7 @@ app.post('/watch-for-publish', async (req, res) => {
       try {
         if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
 
-        const url = `https://firestore.googleapis.com/v1/projects/hypefury-896c7/databases/(default)/documents/threads/${hypefuryPostId}`;
+        const url = `https://firestore.googleapis.com/v1/projects/${process.env.HF_FIREBASE_PROJECT || 'hypefury-896c7'}/databases/(default)/documents/threads/${hypefuryPostId}`;
         const r = await axios.get(url, {
           headers: { Authorization: `Bearer ${hypefuryToken}` },
           validateStatus: () => true,
