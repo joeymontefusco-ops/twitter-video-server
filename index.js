@@ -651,7 +651,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     name: fileName,
     type: 'image/png',
     size: fileSize,
-    altText: 'Madden 26 tips',
+    altText: 'CFB 27 tips',
     thumbnail: thumbnailName,
   };
 }
@@ -770,6 +770,36 @@ function buildYouTubeText(thread) {
   if (cta) parts.push(cta);
 
   return parts.join('\n\n─────────────────\n\n');
+}
+
+// ─── Facebook text builder (strips tweet-specific language) ───────────────
+function buildFacebookText(thread) {
+  const parts = [];
+  const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+
+  const hookLines = (thread.hook || '')
+    .split('\n')
+    .filter(l => !l.includes('In Comments Below') && !l.includes('breakdown in comments'))
+    .join('\n')
+    .trim();
+  if (hookLines) parts.push(hookLines);
+
+  (thread.sections || []).forEach((s, i) => {
+    const sectionText = (s.content || '').trim();
+    if (sectionText) {
+      const emoji = numberEmojis[i] || `${i + 1}.`;
+      parts.push(`${emoji} ${sectionText}`);
+    }
+  });
+
+  const cta = (thread.cta || '')
+    .replace(/tweet/gi, 'post')
+    .replace(/Like ❤️ the tweet/gi, 'Like 👍 this post')
+    .replace(/Follow @MaddenAcademy_/gi, 'Follow The Madden Academy')
+    .trim();
+  if (cta) parts.push(cta);
+
+  return parts.join('\n\n');
 }
 
 // ─── Google Sheets helpers (service account) ──────────────────────────────
@@ -1358,9 +1388,13 @@ app.post('/post-thread', async (req, res) => {
     return res.status(400).json({ error: 'Invalid threadData JSON: ' + e.message });
   }
 
+  const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
   const tweetTexts = [
     thread.hook,
-    ...(thread.sections || []).map(s => s.content),
+    ...(thread.sections || []).map((s, i) => {
+      const emoji = numberEmojis[i] || `${i + 1}.`;
+      return `${emoji} ${s.content}`;
+    }),
     thread.cta,
   ].filter(Boolean);
 
@@ -1500,10 +1534,10 @@ app.post('/post-thread', async (req, res) => {
         },
         autoplug: {
           processed: false,
-          minRetweets: 100,
-          minFavorites: null,
+          minRetweets: null,
+          minFavorites: 1,
           templateName: null,
-          status: 'Get started with your free course here now: https://themaddenacademy.com/',
+          status: 'Become a smarter CFB player in 7 days here: https://themaddenacademy.com/?utm_source=twitter_x02&utm_medium=organic_social',
         },
         postNow: false,
         source: null,
@@ -1512,7 +1546,11 @@ app.post('/post-thread', async (req, res) => {
         tweetshot: null,
         shareOnInstagram: false,
         linkedIn: null,
-        facebook: { text: tweetTexts.join('\n\n'), didUserEditFacebookText: false },
+        facebook: {
+          text: buildFacebookText(thread),
+          didUserEditFacebookText: false,
+          media: allSectionMedia,  // section screenshots only (not review/testimonial)
+        },
         delayBetweenTweets: null,
         tweetMetricsUpdatedAt: null,
         categories: category ? [category] : [],
@@ -1977,25 +2015,6 @@ async function resumeWatches() {
 // ─── /watch-for-publish ───────────────────────────────────────────────────
 // Called by n8n after /post-thread. Polls Firestore in the background until
 // the thread publishes, then stores the tweet data and triggers the drip.
-// ─── /test-rename (temporary debug endpoint) ──────────────────────────────
-app.post('/test-rename', async (req, res) => {
-  const { driveFileId, title } = req.body;
-  if (!driveFileId || !title) {
-    return res.status(400).json({ error: 'Missing driveFileId or title' });
-  }
-  try {
-    await renameDriveFile(driveFileId, title);
-    res.json({ success: true, message: `Renamed ${driveFileId} to "${title}"` });
-  } catch (err) {
-    console.error('[test-rename] Error:', err.message);
-    res.status(500).json({
-      error: err.message,
-      status: err.response?.status,
-      body: err.response?.data,
-    });
-  }
-});
-
 app.post('/watch-for-publish', async (req, res) => {
   const { hypefuryPostId, driveFileId } = req.body;
 
