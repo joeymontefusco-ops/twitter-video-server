@@ -1493,7 +1493,7 @@ app.post('/post-thread', async (req, res) => {
 
         if (reviewMedia) {
           tweets.splice(tweets.length - 2, 0, {
-            status: '🗣️ Real results from Madden Academy members:',
+            status: '🗣️ Real results from Owners Of 16 Spaces System:',
             count: 0,
             media: [reviewMedia],
             guid: uuidv4(),
