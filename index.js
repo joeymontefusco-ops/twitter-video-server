@@ -584,8 +584,8 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
 async function uploadImageToHypefury(imagePath, jwtToken) {
   const imageId = uuidv4();
   const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
-const fileName = `${userId}/${imageId}.png`;
-const thumbnailName = `${userId}/thumbnail-${imageId}.png`;
+const fileName = `${imageId}.png`;
+const thumbnailName = `thumbnail-${imageId}.png`;
   const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
   const fileBuffer = fs.readFileSync(imagePath);
