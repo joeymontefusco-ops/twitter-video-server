@@ -80,16 +80,43 @@ async function getRandomTestimonialImage() {
 
     // Columns: A=Timestamp, B=Rating, C=Review Text, D=Email, E=Image, F=Course
     const dataRows = rows.slice(1);
-    const banned = ['accident', "didn't finish", 'did not finish', 'by mistake', 'pressed complete', 'hit button', 'went to end'];
+    const banned = [
+      // Accidental / incomplete signals
+      'accident', 'accidental', 'accidentally', 'accidently',
+      "didn't finish", 'did not finish', "haven't finished", 'have not finished',
+      'by mistake', 'not on purpose', "wasn't intentional",
+      'pressed complete', 'pressed end', 'pressed finish',
+      'hit button', 'hit complete', 'hit end', 'hit finish',
+      'clicked complete', 'clicked end', 'clicked finish',
+      'went to end', 'went to the end', 'jumped to end', 'skipped to end',
+      // Negative sentiment
+      'not worth', 'not helpful', 'not useful', 'not good',
+      'waste of', 'wasted', 'a waste',
+      'disappointed', 'disappointing', 'let down',
+      'regret', 'regretted',
+      'refund', 'money back',
+      'boring', 'dull',
+      'confusing', 'confused', 'unclear', 'hard to follow', 'hard to understand', 'too complicated',
+      'meh', ' mid ', 'mediocre', 'nothing special', 'nothing new',
+      'bad', 'poor', 'terrible', 'awful', 'horrible', 'sucks', 'sucked',
+      'unhelpful', 'misleading', 'false advertising',
+      'scam', 'ripoff', 'rip off', 'rip-off', 'overpriced', 'too expensive',
+      "not what i expected", "not what i was expecting",
+      "wouldn't recommend", 'would not recommend', "don't recommend", 'do not recommend',
+      'could be better', 'needs work', 'needs improvement',
+    ];
+    const targetCourse = "manu's 16 spaces playbook";
 
     const usable = dataRows.filter(r => {
       const text = (r[2] || '').trim();
       const img = (r[4] || '').trim();           // column E
+      const course = (r[5] || '').trim().toLowerCase(); // column F
       if (!img.startsWith('http')) return false; // must have an image
       if (ratingValue(r[1]) < 4) return false;   // 4–5 stars only
       if (text.length < 15) return false;        // skip near-empty reviews
-      const low = text.toLowerCase();
-      if (banned.some(b => low.includes(b))) return false; // skip "accidental" junk
+      if (course !== targetCourse) return false; // Manu's 16 Spaces Playbook only
+      const low = ' ' + text.toLowerCase() + ' '; // pad so word-boundary bans like ' mid ' work at edges
+      if (banned.some(b => low.includes(b))) return false; // skip accidental/negative reviews
       return true;
     });
 
@@ -651,7 +678,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     name: fileName,
     type: 'image/png',
     size: fileSize,
-    altText: 'CFB 27 tips',
+    altText: 'Madden 26 tips',
     thumbnail: thumbnailName,
   };
 }
@@ -1493,7 +1520,7 @@ app.post('/post-thread', async (req, res) => {
 
         if (reviewMedia) {
           tweets.splice(tweets.length - 2, 0, {
-            status: '🗣️ Real results from Owners Of 16 Spaces System:',
+            status: '🗣️ Real results from Madden Academy members:',
             count: 0,
             media: [reviewMedia],
             guid: uuidv4(),
