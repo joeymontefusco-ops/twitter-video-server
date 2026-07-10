@@ -678,7 +678,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     name: fileName,
     type: 'image/png',
     size: fileSize,
-    altText: 'Madden 26 tips',
+    altText: 'CFB 27 tips',
     thumbnail: thumbnailName,
   };
 }
@@ -1520,7 +1520,7 @@ app.post('/post-thread', async (req, res) => {
 
         if (reviewMedia) {
           tweets.splice(tweets.length - 2, 0, {
-            status: '🗣️ Real results from Madden Academy members:',
+            status: '🗣️ Real results from  Owners Of 16 Spaces System:',
             count: 0,
             media: [reviewMedia],
             guid: uuidv4(),
