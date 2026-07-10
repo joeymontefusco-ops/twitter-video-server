@@ -974,15 +974,7 @@ async function executeDripStep(driveFileId, stage) {
     if (stage === 'promo') {
       // Promo QT: title + "Follow @MaddenAcademy_ for full reveal" + 4 images from hook
       await postPromoQuoteTweet(row, quoteTweetData, title);
-
-      // Also: rename Drive file + notify editor (merged from old workflow)
-      try {
-        await renameDriveFile(row.driveFileId, title);
-        await notifyEditorDiscord(title, row.driveFileId);
-        console.log(`[drip] Drive renamed + editor notified for ${driveFileId}`);
-      } catch (e) {
-        console.error(`[drip] Rename/notify failed (non-fatal):`, e.message);
-      }
+      // Note: Drive rename + editor notify now happen in the watch loop (immediately after publish)
 
     } else if (stage.startsWith('clip')) {
       const clipIndex = parseInt(stage.replace('clip', '')) - 1;
@@ -1520,7 +1512,7 @@ app.post('/post-thread', async (req, res) => {
 
         if (reviewMedia) {
           tweets.splice(tweets.length - 2, 0, {
-            status: '🗣️ Real results from  Owners Of 16 Spaces System:',
+            status: '🗣️ Real results from Owners Of 16 Spaces System:',
             count: 0,
             media: [reviewMedia],
             guid: uuidv4(),
@@ -1991,6 +1983,19 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
                 quoteTweetDataJson: JSON.stringify(quoteTweetData),
               });
               console.log(`[watch] Sheet updated for ${driveFileId}`);
+
+              // Rename Drive file + notify editor immediately after publish
+              try {
+                const title = (firstTweetText || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
+                if (title) {
+                  await renameDriveFile(driveFileId, title);
+                  await notifyEditorDiscord(title, driveFileId);
+                  console.log(`[watch] Drive renamed + editor notified for ${driveFileId}`);
+                }
+              } catch (e) {
+                console.error(`[watch] Rename/notify failed (non-fatal):`, e.message);
+              }
+
               await tryStartDrip(driveFileId);
             }
             return;
