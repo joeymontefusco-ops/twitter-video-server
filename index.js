@@ -1415,6 +1415,11 @@ app.post('/post-thread', async (req, res) => {
             }
           } catch (frameErr) {
             console.error(`[post-thread] Frame/upload failed for section ${section.number}:`, frameErr.message);
+            if (frameErr.response) {
+              console.error(`[post-thread]   status:`, frameErr.response.status);
+              console.error(`[post-thread]   url:`, frameErr.config?.url);
+              console.error(`[post-thread]   body:`, JSON.stringify(frameErr.response.data).substring(0, 500));
+            }
           }
         }
       } catch (videoErr) {
