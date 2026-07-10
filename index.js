@@ -1871,27 +1871,24 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
   }
 });
 
-// ─── /watch-for-publish ───────────────────────────────────────────────────
-// Called by n8n after /post-thread. Polls Firestore in the background until
-// the thread publishes, then stores the tweet data and triggers the drip.
-app.post('/watch-for-publish', async (req, res) => {
-  const { hypefuryPostId, driveFileId } = req.body;
+// ─── Reusable watch loop (used by /watch-for-publish and resumeWatches) ───
+const activeWatches = new Set();
 
-  if (!hypefuryPostId || !driveFileId) {
-    return res.status(400).json({ error: 'Missing hypefuryPostId or driveFileId' });
+async function watchThreadForPublish(hypefuryPostId, driveFileId) {
+  if (activeWatches.has(hypefuryPostId)) {
+    console.log(`[watch] Already watching ${hypefuryPostId}, skipping duplicate`);
+    return;
   }
+  activeWatches.add(hypefuryPostId);
 
-  res.json({ success: true, message: 'Watching for publish...' });
+  const maxWaitMs = 24 * 60 * 60 * 1000; // 24 hours max (Aerielab slots can be far out)
+  const pollInterval = 30 * 1000; // 30 seconds
+  const startedAt = Date.now();
+  const handle = 'MaddenAcademy_';
 
-  // Background polling — doesn't block the HTTP response
-  (async () => {
-    const maxWaitMs = 2 * 60 * 60 * 1000; // 2 hours max
-    const pollInterval = 30 * 1000; // 30 seconds
-    const startedAt = Date.now();
-    const handle = 'MaddenAcademy_';
+  console.log(`[watch] Watching thread ${hypefuryPostId} for publish...`);
 
-    console.log(`[watch] Watching thread ${hypefuryPostId} for publish...`);
-
+  try {
     while (Date.now() - startedAt < maxWaitMs) {
       try {
         if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
@@ -1910,7 +1907,6 @@ app.post('/watch-for-publish', async (req, res) => {
             const tweetUrl = `https://x.com/${handle}/status/${firstId}`;
             console.log(`[watch] Thread published: ${tweetUrl}`);
 
-            // Extract first tweet text for quoteTweetData
             const tweetsArr = r.data?.fields?.tweets?.arrayValue?.values || [];
             const firstTweetText = tweetsArr[0]?.mapValue?.fields?.status?.stringValue || '';
 
@@ -1923,7 +1919,6 @@ app.post('/watch-for-publish', async (req, res) => {
               url: tweetUrl,
             };
 
-            // Update the sheet
             const row = await findSheetRow('driveFileId', driveFileId);
             if (row) {
               await updateSheetRow(row._rowIndex, {
@@ -1931,11 +1926,9 @@ app.post('/watch-for-publish', async (req, res) => {
                 quoteTweetDataJson: JSON.stringify(quoteTweetData),
               });
               console.log(`[watch] Sheet updated for ${driveFileId}`);
-
-              // Try to start drip (if clips are also ready)
               await tryStartDrip(driveFileId);
             }
-            return; // done watching
+            return;
           }
         }
       } catch (err) {
@@ -1945,8 +1938,58 @@ app.post('/watch-for-publish', async (req, res) => {
       await new Promise(r => setTimeout(r, pollInterval));
     }
 
-    console.log(`[watch] Timed out after 2 hours for ${hypefuryPostId}`);
-  })();
+    console.log(`[watch] Timed out after 24 hours for ${hypefuryPostId}`);
+  } finally {
+    activeWatches.delete(hypefuryPostId);
+  }
+}
+
+// ─── resumeWatches — called at startup to recover in-flight watches ───────
+// Finds any sheet row with a hypefuryPostId but no threadPublished, and
+// restarts the watch loop. This makes Railway restarts non-destructive:
+// already-published threads get detected + drip-started on the next boot.
+async function resumeWatches() {
+  try {
+    const rows = await readSheet();
+    let resumed = 0;
+
+    for (const row of rows) {
+      if (!row.hypefuryPostId) continue;
+      if (row.threadPublished === 'true') continue;
+      if (!row.driveFileId) continue;
+
+      console.log(`[watch-recovery] Resuming watch for ${row.hypefuryPostId} (${row.driveFileId})`);
+      // Fire-and-forget: each watch runs independently in the background
+      watchThreadForPublish(row.hypefuryPostId, row.driveFileId).catch(err => {
+        console.error(`[watch-recovery] Watch failed for ${row.hypefuryPostId}:`, err.message);
+      });
+      resumed++;
+    }
+
+    if (resumed > 0) {
+      console.log(`[watch-recovery] Resumed ${resumed} watch(es)`);
+    }
+  } catch (err) {
+    console.error('[watch-recovery] Error:', err.message);
+  }
+}
+
+// ─── /watch-for-publish ───────────────────────────────────────────────────
+// Called by n8n after /post-thread. Polls Firestore in the background until
+// the thread publishes, then stores the tweet data and triggers the drip.
+app.post('/watch-for-publish', async (req, res) => {
+  const { hypefuryPostId, driveFileId } = req.body;
+
+  if (!hypefuryPostId || !driveFileId) {
+    return res.status(400).json({ error: 'Missing hypefuryPostId or driveFileId' });
+  }
+
+  res.json({ success: true, message: 'Watching for publish...' });
+
+  // Fire-and-forget in background so the HTTP response isn't blocked
+  watchThreadForPublish(hypefuryPostId, driveFileId).catch(err => {
+    console.error(`[watch] Background watch failed for ${hypefuryPostId}:`, err.message);
+  });
 });
 
 // ─── /extract-screenshots ─────────────────────────────────────────────────
@@ -2629,4 +2672,5 @@ app.listen(PORT, () => {
   refreshHypefuryToken();
   // Resume any in-progress drips after restart
   setTimeout(() => resumeDrips(), 10000); // wait 10s for token to be ready
+  setTimeout(() => resumeWatches(), 12000); // slightly after drips to avoid race
 });
