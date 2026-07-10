@@ -1331,7 +1331,7 @@ async function notifyEditorDiscord(title, driveFileId) {
   const content = `<@752357571255337052> 🎬 **New video posted!**\n\n**Title:** ${title}\n**Video:** ${link}`;
 
   await axios.post(
-    'https://discord.com/api/webhooks/1503693545096085545/pMM4YNo_TKtM4pqZBnmisgBx2Mox1lp5qxR1e8kwbV81ZSf5D0JRw7jv7ADl8LLD29j9',
+    'https://discord.com/api/webhooks/1501128288926433332/BJOS87mFDb36pJxYgEjMw48mhNTK2mVBW8GPBqZoodiKRHUSr6zComf4PMNrSTtO-SsB',
     { content },
     { headers: { 'Content-Type': 'application/json' } }
   );
