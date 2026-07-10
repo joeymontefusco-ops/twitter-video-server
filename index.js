@@ -1977,6 +1977,25 @@ async function resumeWatches() {
 // ─── /watch-for-publish ───────────────────────────────────────────────────
 // Called by n8n after /post-thread. Polls Firestore in the background until
 // the thread publishes, then stores the tweet data and triggers the drip.
+// ─── /test-rename (temporary debug endpoint) ──────────────────────────────
+app.post('/test-rename', async (req, res) => {
+  const { driveFileId, title } = req.body;
+  if (!driveFileId || !title) {
+    return res.status(400).json({ error: 'Missing driveFileId or title' });
+  }
+  try {
+    await renameDriveFile(driveFileId, title);
+    res.json({ success: true, message: `Renamed ${driveFileId} to "${title}"` });
+  } catch (err) {
+    console.error('[test-rename] Error:', err.message);
+    res.status(500).json({
+      error: err.message,
+      status: err.response?.status,
+      body: err.response?.data,
+    });
+  }
+});
+
 app.post('/watch-for-publish', async (req, res) => {
   const { hypefuryPostId, driveFileId } = req.body;
 
