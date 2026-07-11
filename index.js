@@ -1952,6 +1952,101 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
   }
 });
 
+// ─── Image caption overlay (for Facebook posts) ─────────────────────────
+function wrapText(text, maxCharsPerLine, maxLines = 3) {
+  const words = String(text).split(/\s+/).filter(Boolean);
+  const lines = [];
+  let cur = '';
+  for (const w of words) {
+    const test = cur ? cur + ' ' + w : w;
+    if (test.length > maxCharsPerLine) {
+      if (cur) lines.push(cur);
+      cur = w;
+    } else {
+      cur = test;
+    }
+    if (lines.length >= maxLines) break;
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+  // If we truncated, add ellipsis to last line
+  const usedAll = lines.join(' ').split(/\s+/).length >= words.length;
+  if (!usedAll && lines.length) {
+    const last = lines[lines.length - 1];
+    lines[lines.length - 1] = (last.length + 1 < maxCharsPerLine) ? last + '…' : last.slice(0, -1) + '…';
+  }
+  return lines;
+}
+
+function escapeXml(s) {
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+async function captionImage(inputPath, captionText) {
+  const sharp = require('sharp');
+  const image = sharp(inputPath);
+  const meta = await image.metadata();
+  const width = meta.width;
+  const height = meta.height;
+
+  // Caption bar: ~15% of image height, tuned min/max
+  const barHeight = Math.min(Math.max(Math.floor(height * 0.15), 120), 260);
+  const fontSize = Math.floor(barHeight * 0.26);
+  const padX = Math.floor(width * 0.03);
+  const lineSpacing = Math.floor(fontSize * 1.15);
+  // Rough char-fit; DejaVu Sans avg width ~0.55em
+  const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.55));
+  const lines = wrapText(captionText, maxCharsPerLine, 3);
+
+  const totalTextHeight = lines.length * lineSpacing;
+  const startY = Math.floor((barHeight - totalTextHeight) / 2 + fontSize * 0.85);
+
+  const textNodes = lines.map((line, i) =>
+    `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="700" fill="white">${escapeXml(line)}</text>`
+  ).join('');
+
+  const svg = `<svg width="${width}" height="${barHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${barHeight}" fill="black" fill-opacity="0.78"/>${textNodes}</svg>`;
+
+  return await image
+    .composite([{ input: Buffer.from(svg), top: height - barHeight, left: 0 }])
+    .png()
+    .toBuffer();
+}
+
+// ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
+app.post('/test-caption', async (req, res) => {
+  const { imageUrl, caption } = req.body;
+  if (!imageUrl || !caption) return res.status(400).json({ error: 'Missing imageUrl or caption' });
+
+  try {
+    const dl = await axios.get(imageUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    const tmpIn = path.join('/tmp', `caption_in_${Date.now()}.png`);
+    fs.writeFileSync(tmpIn, Buffer.from(dl.data));
+
+    const captioned = await captionImage(tmpIn, caption);
+    try { fs.unlinkSync(tmpIn); } catch (e) {}
+
+    const tmpOut = path.join('/tmp', `caption_out_${Date.now()}.png`);
+    fs.writeFileSync(tmpOut, captioned);
+
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const media = await uploadImageToHypefury(tmpOut, hypefuryToken);
+    try { fs.unlinkSync(tmpOut); } catch (e) {}
+
+    const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+    const previewUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(media.name)}?alt=media`;
+
+    res.json({ success: true, previewUrl, filename: media.name });
+  } catch (err) {
+    console.error('[test-caption] Error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ─── Reusable watch loop (used by /watch-for-publish and resumeWatches) ───
 const activeWatches = new Set();
 
