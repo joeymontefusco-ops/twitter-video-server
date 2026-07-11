@@ -1994,24 +1994,8 @@ let cachedColoredLogo = null;
 
 async function getColoredLogo() {
   if (cachedColoredLogo) return cachedColoredLogo;
-  const sharp = require('sharp');
-  const meta = await sharp(LOGO_PATH).metadata();
-  // Solid blue masked by the logo's alpha channel → recolored logo
-  cachedColoredLogo = await sharp(LOGO_PATH)
-    .ensureAlpha()
-    .composite([{
-      input: {
-        create: {
-          width: meta.width,
-          height: meta.height,
-          channels: 4,
-          background: { ...BRAND_COLOR_RGB, alpha: 1 },
-        },
-      },
-      blend: 'in',
-    }])
-    .png()
-    .toBuffer();
+  // Load logo as-is (assumes file is already in brand color)
+  cachedColoredLogo = fs.readFileSync(LOGO_PATH);
   return cachedColoredLogo;
 }
 
@@ -2061,8 +2045,9 @@ async function captionImage(inputPath, captionText = null) {
   const svgWidth = Math.floor(width * 0.6);
   const svgHeight = textStackHeight + Math.floor(brandFontSize * 0.5);
   const textX = 10;
-  // Strong shadow filter — larger blur + higher alpha so blue elements stay readable
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${brandFontSize + lineGap + sloganFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="600" fill="${BRAND_COLOR_HEX}" filter="url(#s)">${escapeXml(sloganText)}</text></svg>`;
+  // Slogan: "MENTAL" (blue) + " over META Mastery" (white)
+  const sloganY = brandFontSize + lineGap + sloganFontSize;
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="700" filter="url(#s)"><tspan fill="${BRAND_COLOR_HEX}">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text></svg>`;
 
   // Center logo vertically against the text stack
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
