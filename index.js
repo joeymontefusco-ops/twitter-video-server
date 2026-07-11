@@ -76,7 +76,7 @@ async function getRandomTestimonialImage() {
   try {
     const res = await axios.get(REVIEWS_CSV_URL, { timeout: 15000, responseType: 'text' });
     const rows = parseCSV(res.data);
-    if (rows.length < 2) return null;
+    if (rows.length < 2) return [];
 
     // Columns: A=Timestamp, B=Rating, C=Review Text, D=Email, E=Image, F=Course
     const dataRows = rows.slice(1);
@@ -105,27 +105,43 @@ async function getRandomTestimonialImage() {
       "wouldn't recommend", 'would not recommend', "don't recommend", 'do not recommend',
       'could be better', 'needs work', 'needs improvement',
     ];
-    const targetCourse = "manu's 16 spaces playbook";
 
+    // Qualifying = 4-5 stars + has image + text ≥ 15 chars + no banned phrase
     const usable = dataRows.filter(r => {
       const text = (r[2] || '').trim();
-      const img = (r[4] || '').trim();           // column E
-      const course = (r[5] || '').trim().toLowerCase(); // column F
-      if (!img.startsWith('http')) return false; // must have an image
-      if (ratingValue(r[1]) < 4) return false;   // 4–5 stars only
-      if (text.length < 15) return false;        // skip near-empty reviews
-      if (course !== targetCourse) return false; // Manu's 16 Spaces Playbook only
-      const low = ' ' + text.toLowerCase() + ' '; // pad so word-boundary bans like ' mid ' work at edges
-      if (banned.some(b => low.includes(b))) return false; // skip accidental/negative reviews
+      const img = (r[4] || '').trim();
+      if (!img.startsWith('http')) return false;
+      if (ratingValue(r[1]) < 4) return false;
+      if (text.length < 15) return false;
+      const low = ' ' + text.toLowerCase() + ' ';
+      if (banned.some(b => low.includes(b))) return false;
       return true;
     });
 
-    if (usable.length === 0) return null;
-    const pick = usable[Math.floor(Math.random() * usable.length)];
-    return pick[4].trim();  // the image URL
+    if (usable.length === 0) return [];
+
+    // Split into two pools by course. "16 spaces" match is fuzzy (course name may vary).
+    const sixteenSpaces = usable.filter(r => (r[5] || '').toLowerCase().includes('16 spaces'));
+    const others = usable.filter(r => !(r[5] || '').toLowerCase().includes('16 spaces'));
+
+    const shuffle = arr => arr.slice().sort(() => Math.random() - 0.5);
+    const picked = [];
+
+    // Pick 1 from 16 Spaces first if any exist
+    if (sixteenSpaces.length > 0) {
+      picked.push(shuffle(sixteenSpaces)[0]);
+    }
+
+    // Fill remaining slots from the whole pool (excluding already-picked rows)
+    const remaining = shuffle(usable.filter(r => !picked.includes(r)));
+    while (picked.length < 4 && remaining.length > 0) {
+      picked.push(remaining.shift());
+    }
+
+    return picked.map(r => r[4].trim()); // array of image URLs
   } catch (e) {
     console.error('[testimonial] Failed to fetch:', e.message);
-    return null;
+    return [];
   }
 }
 
@@ -1500,31 +1516,39 @@ app.post('/post-thread', async (req, res) => {
       };
     });
 
-    // Insert a random member review image as the 2nd-to-last tweet (before CTA)
+    // Insert up to 4 random member review images as the 2nd-to-last tweet (before CTA)
     try {
-      const imgUrl = await getRandomTestimonialImage();
-      if (imgUrl) {
-        const tmpReview = path.join('/tmp', `review_${Date.now()}.png`);
-        const dl = await axios.get(imgUrl, { responseType: 'arraybuffer', timeout: 30000 });
-        fs.writeFileSync(tmpReview, dl.data);
-        const reviewMedia = await uploadImageToHypefury(tmpReview, token);
-        try { fs.unlinkSync(tmpReview); } catch (e) {}
+      const imgUrls = await getRandomTestimonialImage();
+      if (imgUrls && imgUrls.length > 0) {
+        const uploadedReviews = [];
+        for (let i = 0; i < imgUrls.length; i++) {
+          try {
+            const tmpReview = path.join('/tmp', `review_${Date.now()}_${i}.png`);
+            const dl = await axios.get(imgUrls[i], { responseType: 'arraybuffer', timeout: 30000 });
+            fs.writeFileSync(tmpReview, dl.data);
+            const media = await uploadImageToHypefury(tmpReview, token);
+            try { fs.unlinkSync(tmpReview); } catch (e) {}
+            if (media) uploadedReviews.push(media);
+          } catch (e) {
+            console.error(`[post-thread] Testimonial image ${i + 1} failed:`, e.message);
+          }
+        }
 
-        if (reviewMedia) {
+        if (uploadedReviews.length > 0) {
           tweets.splice(tweets.length - 2, 0, {
             status: '🗣️ Real results from Owners Of 16 Spaces System:',
             count: 0,
-            media: [reviewMedia],
+            media: uploadedReviews,
             guid: uuidv4(),
             published: false,
             quoteTweetData: null,
             isTrusted: true,
           });
           tweets.forEach((t, i) => { t.count = i; });
-          console.log(`[post-thread] Inserted testimonial image tweet (now ${tweets.length} tweets)`);
+          console.log(`[post-thread] Inserted testimonial tweet with ${uploadedReviews.length} images (now ${tweets.length} tweets)`);
         }
       } else {
-        console.log('[post-thread] No usable testimonial image found');
+        console.log('[post-thread] No usable testimonial images found');
       }
     } catch (e) {
       console.error('[post-thread] Testimonial step failed (non-fatal):', e.message);
