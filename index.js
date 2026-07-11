@@ -2039,8 +2039,8 @@ async function captionImage(inputPath, captionText = null) {
     .resize(logoSize, logoSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer();
-  // Shadow version: blur + darken
-  const logoShadow = await sharp(coloredLogo)
+  // Shadow version: solid black silhouette, blurred, layered twice for strength
+  const singleShadow = await sharp(coloredLogo)
     .resize(logoSize, logoSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .composite([{
       input: {
@@ -2053,7 +2053,7 @@ async function captionImage(inputPath, captionText = null) {
       },
       blend: 'in',
     }])
-    .blur(4)
+    .blur(6)
     .png()
     .toBuffer();
 
@@ -2068,8 +2068,14 @@ async function captionImage(inputPath, captionText = null) {
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
 
   const composites = [
+    // Double-stacked shadow for stronger contrast (matches slogan's shadow strength)
     {
-      input: logoShadow,
+      input: singleShadow,
+      top: brandMargin + logoOffsetY + 2,
+      left: brandMargin + 2,
+    },
+    {
+      input: singleShadow,
       top: brandMargin + logoOffsetY + 2,
       left: brandMargin + 2,
     },
