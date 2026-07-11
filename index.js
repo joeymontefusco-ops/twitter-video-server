@@ -335,10 +335,10 @@ const REF_DEFENSE_B64 = "iVBORw0KGgoAAAANSUhEUgAAAUAAAAC0CAIAAABqhmJGAAABCGlDQ1B
 async function preFilterFrames(frames) {
   const sharp = require('sharp');
   const qualifying = [];
+  const pctLog = []; // for diagnostic logging
 
   for (const frame of frames) {
     try {
-      // Get raw RGB pixel data at 160x90 (tiny but fast, enough to detect colored lines)
       const { data, info } = await sharp(frame.path)
         .resize(160, 90, { fit: 'fill' })
         .raw()
@@ -362,14 +362,19 @@ async function preFilterFrames(frames) {
       }
 
       const pct = (routePixels / totalPixels) * 100;
-      if (pct >= 0.3) qualifying.push(frame);
+      pctLog.push(pct.toFixed(3));
+      // Lowered from 0.3 → 0.1 based on Manu's "capture is bad" report
+      if (pct >= 0.1) qualifying.push(frame);
     } catch (e) {
-      // On error, include frame so Gemini can decide
       qualifying.push(frame);
+      pctLog.push('err');
     }
   }
 
-  console.log(`[prefilter] ${qualifying.length}/${frames.length} frames passed pixel filter`);
+  // Diagnostic: show top 10 highest percentages so we can tune threshold
+  const sorted = [...pctLog].filter(x => x !== 'err').map(Number).sort((a, b) => b - a).slice(0, 10);
+  console.log(`[prefilter] ${qualifying.length}/${frames.length} frames passed (threshold 0.1%)`);
+  console.log(`[prefilter] Top 10 pixel percentages: ${sorted.map(x => x.toFixed(3)).join(', ')}`);
   return qualifying;
 }
 
@@ -1455,8 +1460,7 @@ app.post('/post-thread', async (req, res) => {
 
     const tmpVideo = path.join('/tmp', `post_video_${Date.now()}.mp4`);
     const tmpFrames = [];
-    let sectionMediaMap = {};        // Twitter: branded, no caption
-    let sectionMediaMapFB = {};      // Facebook: branded + section caption
+    let sectionMediaMap = {};
 
     if (driveFileId && thread.sections && thread.sections.length > 0) {
       try {
@@ -1474,32 +1478,17 @@ app.post('/post-thread', async (req, res) => {
         for (const section of thread.sections) {
           const framePath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}.png`);
           const brandedPath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}_branded.png`);
-          const captionedPath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}_captioned.png`);
-          tmpFrames.push(framePath, brandedPath, captionedPath);
+          tmpFrames.push(framePath, brandedPath);
           try {
             await extractFrame(tmpVideo, section.timestamp_sec || 0, framePath);
             if (fs.existsSync(framePath)) {
-              // Twitter version: branding only, no caption
+              // Apply branding (logo + URL + slogan) — used on both Twitter and Facebook
               const brandedBuffer = await captionImage(framePath, null);
               fs.writeFileSync(brandedPath, brandedBuffer);
-              const twitterMedia = await uploadImageToHypefury(brandedPath, token);
-
-              // Facebook version: branding + section text caption
-              const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
-              const idx = thread.sections.indexOf(section);
-              const emoji = numberEmojis[idx] || `${idx + 1}.`;
-              const captionText = `${emoji} ${section.content || ''}`;
-              const captionedBuffer = await captionImage(framePath, captionText);
-              fs.writeFileSync(captionedPath, captionedBuffer);
-              const facebookMedia = await uploadImageToHypefury(captionedPath, token);
-
-              if (twitterMedia) {
-                sectionMediaMap[section.number] = twitterMedia;
-                console.log(`[post-thread] Section ${section.number} branded image uploaded: ${twitterMedia.name}`);
-              }
-              if (facebookMedia) {
-                sectionMediaMapFB[section.number] = facebookMedia;
-                console.log(`[post-thread] Section ${section.number} captioned image uploaded: ${facebookMedia.name}`);
+              const mediaInfo = await uploadImageToHypefury(brandedPath, token);
+              if (mediaInfo) {
+                sectionMediaMap[section.number] = mediaInfo;
+                console.log(`[post-thread] Section ${section.number} branded image uploaded: ${mediaInfo.name}`);
               }
             }
           } catch (frameErr) {
@@ -1519,7 +1508,6 @@ app.post('/post-thread', async (req, res) => {
     }
 
     const allSectionMedia = Object.values(sectionMediaMap);
-    const allSectionMediaFB = Object.values(sectionMediaMapFB);
 
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
@@ -2068,7 +2056,7 @@ async function captionImage(inputPath, captionText = null) {
   const textX = 10;
   // Slogan: "MENTAL" (blue) + " over META Mastery" (white)
   const sloganY = brandFontSize + lineGap + sloganFontSize;
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="700" filter="url(#s)" xml:space="preserve"><tspan fill="${BRAND_COLOR_HEX}" stroke="white" stroke-width="2" paint-order="stroke fill" font-size="${Math.floor(sloganFontSize * 1.4)}">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text></svg>`;
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="700" filter="url(#s)" xml:space="preserve"><tspan fill="#002855" font-size="${Math.floor(sloganFontSize * 1.4)}">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text></svg>`;
 
   // Center logo vertically against the text stack
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
