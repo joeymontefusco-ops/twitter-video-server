@@ -2033,10 +2033,27 @@ async function captionImage(inputPath, captionText = null) {
   const logoSize = Math.floor(textStackHeight * 1.35);
   const logoTextGap = Math.floor(logoSize * 0.18);
 
-  // Load + resize the recolored logo
+  // Load + resize the recolored logo, with a soft dark shadow behind it for contrast
   const coloredLogo = await getColoredLogo();
   const resizedLogo = await sharp(coloredLogo)
     .resize(logoSize, logoSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .png()
+    .toBuffer();
+  // Shadow version: blur + darken
+  const logoShadow = await sharp(coloredLogo)
+    .resize(logoSize, logoSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
+    .composite([{
+      input: {
+        create: {
+          width: logoSize,
+          height: logoSize,
+          channels: 4,
+          background: { r: 0, g: 0, b: 0, alpha: 1 },
+        },
+      },
+      blend: 'in',
+    }])
+    .blur(4)
     .png()
     .toBuffer();
 
@@ -2044,12 +2061,18 @@ async function captionImage(inputPath, captionText = null) {
   const svgWidth = Math.floor(width * 0.6);
   const svgHeight = textStackHeight + Math.floor(brandFontSize * 0.5);
   const textX = 10;
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dx="1" dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.9"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="${BRAND_COLOR_HEX}" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${brandFontSize + lineGap + sloganFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="500" fill="${BRAND_COLOR_HEX}" filter="url(#s)">${escapeXml(sloganText)}</text></svg>`;
+  // Strong shadow filter — larger blur + higher alpha so blue elements stay readable
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${brandFontSize + lineGap + sloganFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="600" fill="${BRAND_COLOR_HEX}" filter="url(#s)">${escapeXml(sloganText)}</text></svg>`;
 
   // Center logo vertically against the text stack
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
 
   const composites = [
+    {
+      input: logoShadow,
+      top: brandMargin + logoOffsetY + 2,
+      left: brandMargin + 2,
+    },
     {
       input: resizedLogo,
       top: brandMargin + logoOffsetY,
