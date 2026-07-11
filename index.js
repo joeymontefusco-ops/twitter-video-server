@@ -1994,7 +1994,6 @@ async function captionImage(inputPath, captionText) {
   const height = meta.height;
 
   // Strip number emojis (1️⃣ 2️⃣ ...) → plain "1." "2." etc.
-  // Also strip other emojis that won't render in the container's fonts.
   const emojiMap = {
     '1️⃣': '1.', '2️⃣': '2.', '3️⃣': '3.', '4️⃣': '4.', '5️⃣': '5.',
     '6️⃣': '6.', '7️⃣': '7.', '8️⃣': '8.', '9️⃣': '9.', '🔟': '10.',
@@ -2003,34 +2002,47 @@ async function captionImage(inputPath, captionText) {
   for (const [emoji, replacement] of Object.entries(emojiMap)) {
     cleaned = cleaned.split(emoji).join(replacement);
   }
-  // Strip any remaining emoji characters (fallback)
   cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
 
-  // Polaroid style: caption BELOW image on a white extension.
+  // ── Watermark: brand text on a dark pill in the bottom-right of the IMAGE ──
+  const brandText = 'themaddenacademy.com';
+  const brandFontSize = Math.max(Math.floor(width * 0.022), 18);
+  const brandPadX = Math.floor(brandFontSize * 0.9);
+  const brandPadY = Math.floor(brandFontSize * 0.45);
+  // Approx text width (avg char ~0.55em)
+  const brandTextWidth = Math.floor(brandText.length * brandFontSize * 0.55);
+  const pillWidth = brandTextWidth + brandPadX * 2;
+  const pillHeight = brandFontSize + brandPadY * 2;
+  const pillMargin = Math.floor(width * 0.02);
+  const pillRadius = Math.floor(pillHeight * 0.35);
+
+  const watermarkSvg = `<svg width="${pillWidth}" height="${pillHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${pillWidth}" height="${pillHeight}" rx="${pillRadius}" ry="${pillRadius}" fill="black" fill-opacity="0.6"/><text x="${pillWidth / 2}" y="${brandPadY + brandFontSize * 0.85}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="600" fill="white" text-anchor="middle">${escapeXml(brandText)}</text></svg>`;
+
+  // ── Caption area: below the image, white background, just the caption text ──
   const fontSize = Math.max(Math.floor(width * 0.028), 22);
-  const brandFontSize = Math.floor(fontSize * 0.7);
   const padX = Math.floor(width * 0.05);
-  const brandPadRight = Math.floor(width * 0.07); // extra right padding for handle
   const padY = Math.floor(fontSize * 0.9);
   const lineSpacing = Math.floor(fontSize * 1.35);
   const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.5));
   const lines = wrapText(cleaned, maxCharsPerLine, 3);
 
   const textBlockHeight = lines.length * lineSpacing;
-  const brandingHeight = Math.floor(brandFontSize * 2.4);
-  const captionAreaHeight = padY + textBlockHeight + brandingHeight;
+  const captionAreaHeight = padY * 2 + textBlockHeight;
 
   const startY = padY + fontSize;
   const textNodes = lines.map((line, i) =>
     `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
   ).join('');
 
-  const brandY = startY + textBlockHeight + brandFontSize;
-  const brandingSvg = `<text x="${width - brandPadRight}" y="${brandY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="400" fill="#888888" text-anchor="end">themaddenacademy.com</text>`;
+  const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}</svg>`;
 
-  const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}${brandingSvg}</svg>`;
-
+  // First: composite the watermark onto the image, then extend + composite caption
   return await image
+    .composite([{
+      input: Buffer.from(watermarkSvg),
+      top: height - pillHeight - pillMargin,
+      left: width - pillWidth - pillMargin,
+    }])
     .extend({
       top: 0,
       bottom: captionAreaHeight,
