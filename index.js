@@ -2036,13 +2036,8 @@ async function captionImage(inputPath, captionText) {
 
   const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}</svg>`;
 
-  // First: composite the watermark onto the image, then extend + composite caption
+  // Extend canvas first, then composite BOTH watermark and caption in one call
   return await image
-    .composite([{
-      input: Buffer.from(watermarkSvg),
-      top: height - pillHeight - pillMargin,
-      left: width - pillWidth - pillMargin,
-    }])
     .extend({
       top: 0,
       bottom: captionAreaHeight,
@@ -2050,7 +2045,18 @@ async function captionImage(inputPath, captionText) {
       right: 0,
       background: { r: 255, g: 255, b: 255, alpha: 1 },
     })
-    .composite([{ input: Buffer.from(captionSvg), top: height, left: 0 }])
+    .composite([
+      {
+        input: Buffer.from(watermarkSvg),
+        top: height - pillHeight - pillMargin,
+        left: width - pillWidth - pillMargin,
+      },
+      {
+        input: Buffer.from(captionSvg),
+        top: height,
+        left: 0,
+      },
+    ])
     .png()
     .toBuffer();
 }
