@@ -2043,11 +2043,12 @@ async function captionImage(inputPath, captionText = null) {
 
   // Text stack SVG (positioned to the right of the logo)
   const svgWidth = Math.floor(width * 0.6);
-  const svgHeight = textStackHeight + Math.floor(brandFontSize * 0.5);
+  // MENTAL is 1.4× the slogan size, so add extra vertical room for it
+  const svgHeight = textStackHeight + Math.floor(sloganFontSize * 0.6) + Math.floor(brandFontSize * 0.5);
   const textX = 10;
   // Slogan: "MENTAL" (blue) + " over META Mastery" (white)
   const sloganY = brandFontSize + lineGap + sloganFontSize;
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="700" filter="url(#s)" xml:space="preserve"><tspan fill="${BRAND_COLOR_HEX}" stroke="white" stroke-width="2" paint-order="stroke fill">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text></svg>`;
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="700" filter="url(#s)" xml:space="preserve"><tspan fill="${BRAND_COLOR_HEX}" stroke="white" stroke-width="2" paint-order="stroke fill" font-size="${Math.floor(sloganFontSize * 1.4)}">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text></svg>`;
 
   // Center logo vertically against the text stack
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
