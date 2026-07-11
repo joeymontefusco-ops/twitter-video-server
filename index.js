@@ -2056,12 +2056,11 @@ async function captionImage(inputPath, captionText = null) {
   const textX = 10;
   // Slogan: "MENTAL" (blue) + " over META Mastery" (white)
   const sloganY = brandFontSize + lineGap + sloganFontSize;
-  // Slogan: MENTAL (no shadow, clean dark blue) + " over META Mastery" (shadowed white)
+  // Slogan: MENTAL (dark blue, no shadow) + " over META Mastery" (white with shadow)
+  // Single text element so spacing is natural (just a space character between tspans)
   const mentalFontSize = Math.floor(sloganFontSize * 1.4);
-  const mentalWidth = Math.floor(mentalFontSize * 5.2); // approx width of "MENTAL" in bold + gap
-  const restX = textX + mentalWidth;
 
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${mentalFontSize}" font-weight="700" fill="#002855">MENTAL</text><text x="${restX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="700" fill="white" filter="url(#s)" xml:space="preserve"> over META Mastery</text></svg>`;
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-weight="700" xml:space="preserve"><tspan fill="#002855" font-size="${mentalFontSize}">MENTAL</tspan><tspan fill="white" font-size="${sloganFontSize}" filter="url(#s)"> over META Mastery</tspan></text></svg>`;
 
   // Center logo vertically against the text stack
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
