@@ -1612,8 +1612,7 @@ app.post('/post-thread', async (req, res) => {
         linkedIn: null,
         facebook: {
           text: buildFacebookText(thread),
-          didUserEditFacebookText: false,
-          media: allSectionMediaFB,  // captioned section screenshots for FB
+          didUserEditFacebookText: true,  // forces Aerielab to use our text, not auto-generated
         },
         delayBetweenTweets: null,
         tweetMetricsUpdatedAt: null,
