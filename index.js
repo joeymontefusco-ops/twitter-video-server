@@ -1986,79 +1986,129 @@ function escapeXml(s) {
     .replace(/'/g, '&apos;');
 }
 
-async function captionImage(inputPath, captionText) {
+// ─── Brand assets (loaded once at first use, cached) ────────────────────
+const LOGO_PATH = path.join(__dirname, 'tma-logo.png');
+const BRAND_COLOR_HEX = '#1E73BE';
+const BRAND_COLOR_RGB = { r: 30, g: 115, b: 190 };
+let cachedColoredLogo = null;
+
+async function getColoredLogo() {
+  if (cachedColoredLogo) return cachedColoredLogo;
+  const sharp = require('sharp');
+  const meta = await sharp(LOGO_PATH).metadata();
+  // Solid blue masked by the logo's alpha channel → recolored logo
+  cachedColoredLogo = await sharp(LOGO_PATH)
+    .ensureAlpha()
+    .composite([{
+      input: {
+        create: {
+          width: meta.width,
+          height: meta.height,
+          channels: 4,
+          background: { ...BRAND_COLOR_RGB, alpha: 1 },
+        },
+      },
+      blend: 'in',
+    }])
+    .png()
+    .toBuffer();
+  return cachedColoredLogo;
+}
+
+async function captionImage(inputPath, captionText = null) {
   const sharp = require('sharp');
   const image = sharp(inputPath);
   const meta = await image.metadata();
   const width = meta.width;
   const height = meta.height;
 
-  // Strip number emojis (1️⃣ 2️⃣ ...) → plain "1." "2." etc.
-  const emojiMap = {
-    '1️⃣': '1.', '2️⃣': '2.', '3️⃣': '3.', '4️⃣': '4.', '5️⃣': '5.',
-    '6️⃣': '6.', '7️⃣': '7.', '8️⃣': '8.', '9️⃣': '9.', '🔟': '10.',
-  };
-  let cleaned = String(captionText);
-  for (const [emoji, replacement] of Object.entries(emojiMap)) {
-    cleaned = cleaned.split(emoji).join(replacement);
-  }
-  cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
-
-  // ── Watermark: brand + slogan stacked in TOP-LEFT of the IMAGE ──
+  // ── Watermark: logo + brand + slogan, all blue, top-left ──
   const brandText = 'themaddenacademy.com';
   const sloganText = 'MENTAL over META Mastery';
   const brandFontSize = Math.max(Math.floor(width * 0.026), 22);
   const sloganFontSize = Math.floor(brandFontSize * 0.72);
-  const svgWidth = Math.floor(width * 0.5);
-  const lineGap = Math.floor(brandFontSize * 0.35);
-  const svgHeight = brandFontSize + lineGap + sloganFontSize + Math.floor(brandFontSize * 0.5);
   const brandMargin = Math.floor(width * 0.02);
-  const textPadLeft = 10;
+  const lineGap = Math.floor(brandFontSize * 0.35);
+  const textStackHeight = brandFontSize + lineGap + sloganFontSize;
+  const logoSize = Math.floor(textStackHeight * 1.35);
+  const logoTextGap = Math.floor(logoSize * 0.18);
 
-  // Both lines: white text with soft shadow for readability on any background
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dx="1" dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.9"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textPadLeft}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textPadLeft}" y="${brandFontSize + lineGap + sloganFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="500" fill="white" filter="url(#s)">${escapeXml(sloganText)}</text></svg>`;
-
-  // ── Caption area: below the image, white background, just the caption text ──
-  const fontSize = Math.max(Math.floor(width * 0.028), 22);
-  const padX = Math.floor(width * 0.05);
-  const padY = Math.floor(fontSize * 0.9);
-  const lineSpacing = Math.floor(fontSize * 1.35);
-  const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.5));
-  const lines = wrapText(cleaned, maxCharsPerLine, 3);
-
-  const textBlockHeight = lines.length * lineSpacing;
-  const captionAreaHeight = padY * 2 + textBlockHeight;
-
-  const startY = padY + fontSize;
-  const textNodes = lines.map((line, i) =>
-    `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
-  ).join('');
-
-  const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}</svg>`;
-
-  // Extend canvas first, then composite BOTH watermark and caption in one call
-  return await image
-    .extend({
-      top: 0,
-      bottom: captionAreaHeight,
-      left: 0,
-      right: 0,
-      background: { r: 255, g: 255, b: 255, alpha: 1 },
-    })
-    .composite([
-      {
-        input: Buffer.from(watermarkSvg),
-        top: brandMargin,
-        left: brandMargin,
-      },
-      {
-        input: Buffer.from(captionSvg),
-        top: height,
-        left: 0,
-      },
-    ])
+  // Load + resize the recolored logo
+  const coloredLogo = await getColoredLogo();
+  const resizedLogo = await sharp(coloredLogo)
+    .resize(logoSize, logoSize, { fit: 'contain', background: { r: 0, g: 0, b: 0, alpha: 0 } })
     .png()
     .toBuffer();
+
+  // Text stack SVG (positioned to the right of the logo)
+  const svgWidth = Math.floor(width * 0.6);
+  const svgHeight = textStackHeight + Math.floor(brandFontSize * 0.5);
+  const textX = 10;
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dx="1" dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.9"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="${BRAND_COLOR_HEX}" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${brandFontSize + lineGap + sloganFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="500" fill="${BRAND_COLOR_HEX}" filter="url(#s)">${escapeXml(sloganText)}</text></svg>`;
+
+  // Center logo vertically against the text stack
+  const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
+
+  const composites = [
+    {
+      input: resizedLogo,
+      top: brandMargin + logoOffsetY,
+      left: brandMargin,
+    },
+    {
+      input: Buffer.from(watermarkSvg),
+      top: brandMargin,
+      left: brandMargin + logoSize + logoTextGap,
+    },
+  ];
+
+  // ── If caption provided, add caption area below image (Facebook mode) ──
+  if (captionText) {
+    const emojiMap = {
+      '1️⃣': '1.', '2️⃣': '2.', '3️⃣': '3.', '4️⃣': '4.', '5️⃣': '5.',
+      '6️⃣': '6.', '7️⃣': '7.', '8️⃣': '8.', '9️⃣': '9.', '🔟': '10.',
+    };
+    let cleaned = String(captionText);
+    for (const [emoji, replacement] of Object.entries(emojiMap)) {
+      cleaned = cleaned.split(emoji).join(replacement);
+    }
+    cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
+
+    const fontSize = Math.max(Math.floor(width * 0.028), 22);
+    const padX = Math.floor(width * 0.05);
+    const padY = Math.floor(fontSize * 0.9);
+    const lineSpacing = Math.floor(fontSize * 1.35);
+    const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.5));
+    const lines = wrapText(cleaned, maxCharsPerLine, 3);
+    const textBlockHeight = lines.length * lineSpacing;
+    const captionAreaHeight = padY * 2 + textBlockHeight;
+    const startY = padY + fontSize;
+    const textNodes = lines.map((line, i) =>
+      `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
+    ).join('');
+    const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}</svg>`;
+
+    composites.push({
+      input: Buffer.from(captionSvg),
+      top: height,
+      left: 0,
+    });
+
+    return await image
+      .extend({
+        top: 0,
+        bottom: captionAreaHeight,
+        left: 0,
+        right: 0,
+        background: { r: 255, g: 255, b: 255, alpha: 1 },
+      })
+      .composite(composites)
+      .png()
+      .toBuffer();
+  }
+
+  // No caption — just watermark on image (Twitter mode)
+  return await image.composite(composites).png().toBuffer();
 }
 
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
