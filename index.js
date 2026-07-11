@@ -1455,7 +1455,8 @@ app.post('/post-thread', async (req, res) => {
 
     const tmpVideo = path.join('/tmp', `post_video_${Date.now()}.mp4`);
     const tmpFrames = [];
-    let sectionMediaMap = {};
+    let sectionMediaMap = {};        // Twitter: branded, no caption
+    let sectionMediaMapFB = {};      // Facebook: branded + section caption
 
     if (driveFileId && thread.sections && thread.sections.length > 0) {
       try {
@@ -1472,14 +1473,33 @@ app.post('/post-thread', async (req, res) => {
 
         for (const section of thread.sections) {
           const framePath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}.png`);
-          tmpFrames.push(framePath);
+          const brandedPath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}_branded.png`);
+          const captionedPath = path.join('/tmp', `post_frame_${Date.now()}_${section.number}_captioned.png`);
+          tmpFrames.push(framePath, brandedPath, captionedPath);
           try {
             await extractFrame(tmpVideo, section.timestamp_sec || 0, framePath);
             if (fs.existsSync(framePath)) {
-              const mediaInfo = await uploadImageToHypefury(framePath, token);
-              if (mediaInfo) {
-                sectionMediaMap[section.number] = mediaInfo;
-                console.log(`[post-thread] Section ${section.number} image uploaded: ${mediaInfo.name}`);
+              // Twitter version: branding only, no caption
+              const brandedBuffer = await captionImage(framePath, null);
+              fs.writeFileSync(brandedPath, brandedBuffer);
+              const twitterMedia = await uploadImageToHypefury(brandedPath, token);
+
+              // Facebook version: branding + section text caption
+              const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+              const idx = thread.sections.indexOf(section);
+              const emoji = numberEmojis[idx] || `${idx + 1}.`;
+              const captionText = `${emoji} ${section.content || ''}`;
+              const captionedBuffer = await captionImage(framePath, captionText);
+              fs.writeFileSync(captionedPath, captionedBuffer);
+              const facebookMedia = await uploadImageToHypefury(captionedPath, token);
+
+              if (twitterMedia) {
+                sectionMediaMap[section.number] = twitterMedia;
+                console.log(`[post-thread] Section ${section.number} branded image uploaded: ${twitterMedia.name}`);
+              }
+              if (facebookMedia) {
+                sectionMediaMapFB[section.number] = facebookMedia;
+                console.log(`[post-thread] Section ${section.number} captioned image uploaded: ${facebookMedia.name}`);
               }
             }
           } catch (frameErr) {
@@ -1499,6 +1519,7 @@ app.post('/post-thread', async (req, res) => {
     }
 
     const allSectionMedia = Object.values(sectionMediaMap);
+    const allSectionMediaFB = Object.values(sectionMediaMapFB);
 
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
@@ -1592,7 +1613,7 @@ app.post('/post-thread', async (req, res) => {
         facebook: {
           text: buildFacebookText(thread),
           didUserEditFacebookText: false,
-          media: allSectionMedia,  // section screenshots only (not review/testimonial)
+          media: allSectionMediaFB,  // captioned section screenshots for FB
         },
         delayBetweenTweets: null,
         tweetMetricsUpdatedAt: null,
