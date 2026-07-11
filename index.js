@@ -2004,19 +2004,16 @@ async function captionImage(inputPath, captionText) {
   }
   cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
 
-  // ── Watermark: brand text on a dark pill in the bottom-right of the IMAGE ──
+  // ── Watermark: brand text in bottom-right of the IMAGE (no background, with shadow) ──
   const brandText = 'themaddenacademy.com';
-  const brandFontSize = Math.max(Math.floor(width * 0.022), 18);
-  const brandPadX = Math.floor(brandFontSize * 0.9);
-  const brandPadY = Math.floor(brandFontSize * 0.45);
-  // Approx text width (avg char ~0.55em)
-  const brandTextWidth = Math.floor(brandText.length * brandFontSize * 0.55);
-  const pillWidth = brandTextWidth + brandPadX * 2;
-  const pillHeight = brandFontSize + brandPadY * 2;
-  const pillMargin = Math.floor(width * 0.02);
-  const pillRadius = Math.floor(pillHeight * 0.35);
+  const brandFontSize = Math.max(Math.floor(width * 0.024), 20);
+  // Generous width to avoid clipping (rough char width can vary by font)
+  const svgWidth = Math.floor(width * 0.5);
+  const svgHeight = Math.floor(brandFontSize * 2);
+  const brandMargin = Math.floor(width * 0.02);
 
-  const watermarkSvg = `<svg width="${pillWidth}" height="${pillHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${pillWidth}" height="${pillHeight}" rx="${pillRadius}" ry="${pillRadius}" fill="black" fill-opacity="0.6"/><text x="${pillWidth / 2}" y="${brandPadY + brandFontSize * 0.85}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="600" fill="white" text-anchor="middle">${escapeXml(brandText)}</text></svg>`;
+  // White text with black shadow filter — readable on any background, no pill needed
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dx="1" dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.9"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${svgWidth - 10}" y="${svgHeight / 2 + brandFontSize * 0.35}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="600" fill="white" text-anchor="end" filter="url(#s)">${escapeXml(brandText)}</text></svg>`;
 
   // ── Caption area: below the image, white background, just the caption text ──
   const fontSize = Math.max(Math.floor(width * 0.028), 22);
@@ -2048,8 +2045,8 @@ async function captionImage(inputPath, captionText) {
     .composite([
       {
         input: Buffer.from(watermarkSvg),
-        top: height - pillHeight - pillMargin,
-        left: width - pillWidth - pillMargin,
+        top: height - svgHeight - brandMargin,
+        left: width - svgWidth - brandMargin,
       },
       {
         input: Buffer.from(captionSvg),
