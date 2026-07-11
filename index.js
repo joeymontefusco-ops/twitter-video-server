@@ -2004,16 +2004,19 @@ async function captionImage(inputPath, captionText) {
   }
   cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
 
-  // ── Watermark: brand text in bottom-right of the IMAGE (no background, with shadow) ──
+  // ── Watermark: brand + slogan stacked in TOP-LEFT of the IMAGE ──
   const brandText = 'themaddenacademy.com';
-  const brandFontSize = Math.max(Math.floor(width * 0.024), 20);
-  // Generous width to avoid clipping (rough char width can vary by font)
+  const sloganText = 'MENTAL over META Mastery';
+  const brandFontSize = Math.max(Math.floor(width * 0.026), 22);
+  const sloganFontSize = Math.floor(brandFontSize * 0.72);
   const svgWidth = Math.floor(width * 0.5);
-  const svgHeight = Math.floor(brandFontSize * 2);
+  const lineGap = Math.floor(brandFontSize * 0.35);
+  const svgHeight = brandFontSize + lineGap + sloganFontSize + Math.floor(brandFontSize * 0.5);
   const brandMargin = Math.floor(width * 0.02);
+  const textPadLeft = 10;
 
-  // White text with black shadow filter — readable on any background, no pill needed
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dx="1" dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.9"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${svgWidth - 10}" y="${svgHeight / 2 + brandFontSize * 0.35}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="600" fill="white" text-anchor="end" filter="url(#s)">${escapeXml(brandText)}</text></svg>`;
+  // Both lines: white text with soft shadow for readability on any background
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur in="SourceAlpha" stdDeviation="2"/><feOffset dx="1" dy="1"/><feComponentTransfer><feFuncA type="linear" slope="0.9"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textPadLeft}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textPadLeft}" y="${brandFontSize + lineGap + sloganFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${sloganFontSize}" font-weight="500" fill="white" filter="url(#s)">${escapeXml(sloganText)}</text></svg>`;
 
   // ── Caption area: below the image, white background, just the caption text ──
   const fontSize = Math.max(Math.floor(width * 0.028), 22);
@@ -2045,8 +2048,8 @@ async function captionImage(inputPath, captionText) {
     .composite([
       {
         input: Buffer.from(watermarkSvg),
-        top: height - svgHeight - brandMargin,
-        left: width - svgWidth - brandMargin,
+        top: brandMargin,
+        left: brandMargin,
       },
       {
         input: Buffer.from(captionSvg),
