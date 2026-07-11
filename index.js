@@ -1993,32 +1993,43 @@ async function captionImage(inputPath, captionText) {
   const width = meta.width;
   const height = meta.height;
 
+  // Strip number emojis (1️⃣ 2️⃣ ...) → plain "1." "2." etc.
+  // Also strip other emojis that won't render in the container's fonts.
+  const emojiMap = {
+    '1️⃣': '1.', '2️⃣': '2.', '3️⃣': '3.', '4️⃣': '4.', '5️⃣': '5.',
+    '6️⃣': '6.', '7️⃣': '7.', '8️⃣': '8.', '9️⃣': '9.', '🔟': '10.',
+  };
+  let cleaned = String(captionText);
+  for (const [emoji, replacement] of Object.entries(emojiMap)) {
+    cleaned = cleaned.split(emoji).join(replacement);
+  }
+  // Strip any remaining emoji characters (fallback)
+  cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
+
   // Polaroid style: caption BELOW image on a white extension.
   const fontSize = Math.max(Math.floor(width * 0.028), 22);
   const brandFontSize = Math.floor(fontSize * 0.7);
   const padX = Math.floor(width * 0.05);
+  const brandPadRight = Math.floor(width * 0.07); // extra right padding for handle
   const padY = Math.floor(fontSize * 0.9);
   const lineSpacing = Math.floor(fontSize * 1.35);
   const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.5));
-  const lines = wrapText(captionText, maxCharsPerLine, 3);
+  const lines = wrapText(cleaned, maxCharsPerLine, 3);
 
   const textBlockHeight = lines.length * lineSpacing;
-  const brandingHeight = Math.floor(brandFontSize * 2.2);
+  const brandingHeight = Math.floor(brandFontSize * 2.4);
   const captionAreaHeight = padY + textBlockHeight + brandingHeight;
 
-  // Build SVG for the caption area
   const startY = padY + fontSize;
   const textNodes = lines.map((line, i) =>
     `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
   ).join('');
 
-  // Subtle signature (option 1: bottom-right handle only)
   const brandY = startY + textBlockHeight + brandFontSize;
-  const brandingSvg = `<text x="${width - padX}" y="${brandY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="400" fill="#888888" text-anchor="end">@MaddenAcademy_</text>`;
+  const brandingSvg = `<text x="${width - brandPadRight}" y="${brandY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="400" fill="#888888" text-anchor="end">themaddenacademy.com</text>`;
 
   const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}${brandingSvg}</svg>`;
 
-  // Extend canvas downward with white, then composite caption
   return await image
     .extend({
       top: 0,
