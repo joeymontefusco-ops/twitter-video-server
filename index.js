@@ -1993,26 +1993,41 @@ async function captionImage(inputPath, captionText) {
   const width = meta.width;
   const height = meta.height;
 
-  // Caption bar: ~15% of image height, tuned min/max
-  const barHeight = Math.min(Math.max(Math.floor(height * 0.15), 120), 260);
-  const fontSize = Math.floor(barHeight * 0.26);
-  const padX = Math.floor(width * 0.03);
-  const lineSpacing = Math.floor(fontSize * 1.15);
-  // Rough char-fit; DejaVu Sans avg width ~0.55em
-  const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.55));
+  // Polaroid style: caption BELOW image on a white extension.
+  const fontSize = Math.max(Math.floor(width * 0.028), 22);
+  const brandFontSize = Math.floor(fontSize * 0.7);
+  const padX = Math.floor(width * 0.05);
+  const padY = Math.floor(fontSize * 0.9);
+  const lineSpacing = Math.floor(fontSize * 1.35);
+  const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.5));
   const lines = wrapText(captionText, maxCharsPerLine, 3);
 
-  const totalTextHeight = lines.length * lineSpacing;
-  const startY = Math.floor((barHeight - totalTextHeight) / 2 + fontSize * 0.85);
+  const textBlockHeight = lines.length * lineSpacing;
+  const brandingHeight = Math.floor(brandFontSize * 2.2);
+  const captionAreaHeight = padY + textBlockHeight + brandingHeight;
 
+  // Build SVG for the caption area
+  const startY = padY + fontSize;
   const textNodes = lines.map((line, i) =>
-    `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="700" fill="white">${escapeXml(line)}</text>`
+    `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
   ).join('');
 
-  const svg = `<svg width="${width}" height="${barHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${barHeight}" fill="black" fill-opacity="0.78"/>${textNodes}</svg>`;
+  // Subtle signature (option 1: bottom-right handle only)
+  const brandY = startY + textBlockHeight + brandFontSize;
+  const brandingSvg = `<text x="${width - padX}" y="${brandY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="400" fill="#888888" text-anchor="end">@MaddenAcademy_</text>`;
 
+  const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}${brandingSvg}</svg>`;
+
+  // Extend canvas downward with white, then composite caption
   return await image
-    .composite([{ input: Buffer.from(svg), top: height - barHeight, left: 0 }])
+    .extend({
+      top: 0,
+      bottom: captionAreaHeight,
+      left: 0,
+      right: 0,
+      background: { r: 255, g: 255, b: 255, alpha: 1 },
+    })
+    .composite([{ input: Buffer.from(captionSvg), top: height, left: 0 }])
     .png()
     .toBuffer();
 }
