@@ -1001,7 +1001,11 @@ async function executeDripStep(driveFileId, stage) {
       const clipIndex = parseInt(stage.replace('clip', '')) - 1;
       if (clipData[clipIndex]) {
         const clipUrl = clipData[clipIndex].url;
-        const commentText = `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+        const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+        const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+        const commentText = isSelfQt
+          ? `${title}\n\nFollow for the full breakdown 👇`
+          : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
         await postClipQuoteTweet(clipUrl, quoteTweetData, commentText);
       } else {
         console.log(`[drip] No clip at index ${clipIndex} — skipping ${stage}`);
@@ -1009,7 +1013,11 @@ async function executeDripStep(driveFileId, stage) {
 
     } else if (stage === 'fullvideo') {
       const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
-      const commentText = `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
+      const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+      const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+      const commentText = isSelfQt
+        ? `Here's the full video breakdown 👇\n\nFollow for daily Madden tips`
+        : `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
       await postClipQuoteTweet(driveUrl, quoteTweetData, commentText);
     }
 
@@ -1120,8 +1128,11 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
   console.log(`[drip-promo] Uploaded ${uploadedMedia.length} images for Manu's promo tweet`);
 
   // Build the promo tweet
-  const userId = 'Jc9SLRhASBPPGTA6CK53BOOUTeW2'; // Manu's account
-  const status = `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+  const userId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2'; // default Manu, override to TMA via env
+  const isSelfQt = userId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+  const status = isSelfQt
+    ? `${title}\n\nFollow for the full breakdown 👇`
+    : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
 
   const payload = {
     currentUserId: userId,
@@ -1211,7 +1222,7 @@ async function postClipQuoteTweet(videoUrl, quoteTweetData, commentText) {
   // Reuse the existing /quote-tweet-hypefury logic internally
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
-  const userId = 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+  const userId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
 
   const tmpVideo = path.join('/tmp', `drip_${Date.now()}_${uuidv4()}.mp4`);
 
@@ -1802,8 +1813,8 @@ app.post('/quote-tweet-hypefury', async (req, res) => {
     };
   }
 
-  // Default to Manu's account; allow override
-  const userId = quoteUserId || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+  // Default: env var → passed override → Manu's account (fallback)
+  const userId = quoteUserId || process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
 
   if (!hypefuryToken || Date.now() > tokenExpiry) {
     await refreshHypefuryToken();
@@ -2060,7 +2071,7 @@ async function captionImage(inputPath, captionText = null) {
   // Single text element so spacing is natural (just a space character between tspans)
   const mentalFontSize = Math.floor(sloganFontSize * 1.4);
 
-  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-weight="700" xml:space="preserve"><tspan fill="#002855" font-size="${mentalFontSize}">MENTAL</tspan><tspan fill="white" font-size="${sloganFontSize}" filter="url(#s)"> over META Mastery</tspan></text></svg>`;
+  const watermarkSvg = `<svg width="${svgWidth}" height="${svgHeight}" xmlns="http://www.w3.org/2000/svg"><defs><filter id="s" x="-30%" y="-30%" width="160%" height="160%"><feGaussianBlur in="SourceAlpha" stdDeviation="3"/><feOffset dx="2" dy="2"/><feComponentTransfer><feFuncA type="linear" slope="1.2"/></feComponentTransfer><feMerge><feMergeNode/><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs><text x="${textX}" y="${brandFontSize}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${brandFontSize}" font-weight="700" fill="white" filter="url(#s)">${escapeXml(brandText)}</text><text x="${textX}" y="${sloganY}" font-family="DejaVu Sans, Arial, sans-serif" font-weight="700" xml:space="preserve"><tspan fill="#002855" stroke="white" stroke-width="2" paint-order="stroke fill" font-size="${mentalFontSize}">MENTAL</tspan><tspan fill="white" font-size="${sloganFontSize}" filter="url(#s)"> over META Mastery</tspan></text></svg>`;
 
   // Center logo vertically against the text stack
   const logoOffsetY = Math.floor((textStackHeight - logoSize) / 2);
