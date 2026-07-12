@@ -703,6 +703,37 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     thumbnail: thumbnailName,
   };
 }
+
+// ─── Verify a Firebase Storage file exists (helps catch race conditions) ──
+async function verifyMediaExists(fileName, jwtToken) {
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(fileName)}`;
+  try {
+    const r = await axios.get(url, {
+      headers: { Authorization: `Firebase ${jwtToken}` },
+      validateStatus: () => true,
+      timeout: 5000,
+    });
+    return r.status === 200;
+  } catch (e) {
+    return false;
+  }
+}
+
+// ─── Upload with verification + retry (prevents "No such object" errors) ──
+async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const media = await uploadImageToHypefury(imagePath, jwtToken);
+    if (!media) continue;
+    const exists = await verifyMediaExists(media.name, jwtToken);
+    if (exists) return media;
+    console.log(`[upload-verify] ${media.name} not visible after upload (attempt ${attempt}/${maxAttempts}) — retrying`);
+    await new Promise(r => setTimeout(r, 1500));
+  }
+  console.error(`[upload-verify] Failed to verify uploaded image after ${maxAttempts} attempts`);
+  return null;
+}
+
 // ─── Upload video to Hypefury Firebase Storage ────────────────────────────
 // Mirrors uploadImageToHypefury, but for mp4 video with a real poster-frame
 // thumbnail (extracted via ffmpeg). Returns the media object Hypefury expects.
@@ -1004,7 +1035,7 @@ async function executeDripStep(driveFileId, stage) {
         const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
         const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
         const commentText = isSelfQt
-          ? `${title}\n\nFollow for the full breakdown 👇`
+          ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
           : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
         await postClipQuoteTweet(clipUrl, quoteTweetData, commentText);
       } else {
@@ -1016,7 +1047,7 @@ async function executeDripStep(driveFileId, stage) {
       const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
       const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
       const commentText = isSelfQt
-        ? `Here's the full video breakdown 👇\n\nFollow for daily Madden tips`
+        ? `Here's the full video breakdown 👇\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
         : `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
       await postClipQuoteTweet(driveUrl, quoteTweetData, commentText);
     }
@@ -1131,7 +1162,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
   const userId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2'; // default Manu, override to TMA via env
   const isSelfQt = userId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
   const status = isSelfQt
-    ? `${title}\n\nFollow for the full breakdown 👇`
+    ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
     : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
 
   const payload = {
@@ -1440,8 +1471,17 @@ app.post('/post-thread', async (req, res) => {
   }
 
   const numberEmojis = ['1️⃣','2️⃣','3️⃣','4️⃣','5️⃣','6️⃣','7️⃣','8️⃣','9️⃣','🔟'];
+  const numberKeycap = { '1':'1️⃣','2':'2️⃣','3':'3️⃣','4':'4️⃣','5':'5️⃣','6':'6️⃣','7':'7️⃣','8':'8️⃣','9':'9️⃣' };
+
+  // Format hook: convert "N Part" → "N️⃣ Part" and ensure blank line before the ♟️ line
+  let formattedHook = (thread.hook || '');
+  // Add blank line between title and "♟️ N Part ..." line if not already there
+  formattedHook = formattedHook.replace(/([^\n])\n(♟️)/g, '$1\n\n$2');
+  // Convert plain digit to keycap emoji in the "N Part" pattern
+  formattedHook = formattedHook.replace(/♟️\s+(\d)\s+Part/g, (m, n) => `♟️ ${numberKeycap[n] || n} Part`);
+
   const tweetTexts = [
-    thread.hook,
+    formattedHook,
     ...(thread.sections || []).map((s, i) => {
       const emoji = numberEmojis[i] || `${i + 1}.`;
       return `${emoji} ${s.content}`;
@@ -1496,7 +1536,7 @@ app.post('/post-thread', async (req, res) => {
               // Apply branding (logo + URL + slogan) — used on both Twitter and Facebook
               const brandedBuffer = await captionImage(framePath, null);
               fs.writeFileSync(brandedPath, brandedBuffer);
-              const mediaInfo = await uploadImageToHypefury(brandedPath, token);
+              const mediaInfo = await uploadImageVerified(brandedPath, token);
               if (mediaInfo) {
                 sectionMediaMap[section.number] = mediaInfo;
                 console.log(`[post-thread] Section ${section.number} branded image uploaded: ${mediaInfo.name}`);
@@ -1546,7 +1586,7 @@ app.post('/post-thread', async (req, res) => {
             const tmpReview = path.join('/tmp', `review_${Date.now()}_${i}.png`);
             const dl = await axios.get(imgUrls[i], { responseType: 'arraybuffer', timeout: 30000 });
             fs.writeFileSync(tmpReview, dl.data);
-            const media = await uploadImageToHypefury(tmpReview, token);
+            const media = await uploadImageVerified(tmpReview, token);
             try { fs.unlinkSync(tmpReview); } catch (e) {}
             if (media) uploadedReviews.push(media);
           } catch (e) {
