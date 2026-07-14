@@ -734,6 +734,72 @@ async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
   return null;
 }
 
+
+// ─── Facebook Graph API: post to TMA's Page with multiple photos ──────────
+async function postToFacebook(message, imagePaths) {
+  const pageId = process.env.FB_PAGE_ID;
+  const token = process.env.FB_PAGE_ACCESS_TOKEN;
+  if (!pageId || !token) {
+    console.log('[fb] Skipped — FB_PAGE_ID or FB_PAGE_ACCESS_TOKEN not set');
+    return null;
+  }
+  if (!imagePaths || imagePaths.length === 0) {
+    console.log('[fb] Skipped — no images to post');
+    return null;
+  }
+
+  try {
+    const mediaFbIds = [];
+    for (let i = 0; i < imagePaths.length; i++) {
+      if (!fs.existsSync(imagePaths[i])) {
+        console.log(`[fb] Image ${i + 1} missing: ${imagePaths[i]} — skipping`);
+        continue;
+      }
+      const form = new FormData();
+      form.append('source', fs.createReadStream(imagePaths[i]));
+      form.append('published', 'false');
+      form.append('access_token', token);
+
+      const r = await axios.post(
+        `https://graph.facebook.com/v25.0/${pageId}/photos`,
+        form,
+        { headers: form.getHeaders(), maxContentLength: Infinity, maxBodyLength: Infinity }
+      );
+      if (r.data && r.data.id) {
+        mediaFbIds.push(r.data.id);
+        console.log(`[fb] Uploaded photo ${i + 1}/${imagePaths.length}: ${r.data.id}`);
+      }
+    }
+
+    if (mediaFbIds.length === 0) {
+      console.log('[fb] No photos uploaded successfully — aborting post');
+      return null;
+    }
+
+    const attachedMedia = mediaFbIds.map(id => ({ media_fbid: id }));
+    const feedForm = new FormData();
+    feedForm.append('message', message || '');
+    feedForm.append('attached_media', JSON.stringify(attachedMedia));
+    feedForm.append('access_token', token);
+
+    const postResp = await axios.post(
+      `https://graph.facebook.com/v25.0/${pageId}/feed`,
+      feedForm,
+      { headers: feedForm.getHeaders() }
+    );
+
+    console.log(`[fb] Posted to Facebook: ${postResp.data?.id}`);
+    return postResp.data?.id || null;
+  } catch (err) {
+    console.error('[fb] Post failed:', err.message);
+    if (err.response) {
+      console.error('[fb]   status:', err.response.status);
+      console.error('[fb]   body:', JSON.stringify(err.response.data).substring(0, 500));
+    }
+    return null;
+  }
+}
+
 // ─── Upload video to Hypefury Firebase Storage ────────────────────────────
 // Mirrors uploadImageToHypefury, but for mp4 video with a real poster-frame
 // thumbnail (extracted via ffmpeg). Returns the media object Hypefury expects.
@@ -1512,6 +1578,7 @@ app.post('/post-thread', async (req, res) => {
     const tmpVideo = path.join('/tmp', `post_video_${Date.now()}.mp4`);
     const tmpFrames = [];
     let sectionMediaMap = {};
+    const sectionBrandedPaths = {}; // section number → local branded PNG path (for FB post)
 
     if (driveFileId && thread.sections && thread.sections.length > 0) {
       try {
@@ -1536,6 +1603,7 @@ app.post('/post-thread', async (req, res) => {
               // Apply branding (logo + URL + slogan) — used on both Twitter and Facebook
               const brandedBuffer = await captionImage(framePath, null);
               fs.writeFileSync(brandedPath, brandedBuffer);
+              sectionBrandedPaths[section.number] = brandedPath; // keep for FB post
               const mediaInfo = await uploadImageVerified(brandedPath, token);
               if (mediaInfo) {
                 sectionMediaMap[section.number] = mediaInfo;
@@ -1551,10 +1619,13 @@ app.post('/post-thread', async (req, res) => {
             }
           }
         }
+        // Clean up: video + non-branded frame (keep branded PNGs for FB post below)
+        try { if (fs.existsSync(tmpVideo)) fs.unlinkSync(tmpVideo); } catch (e) {}
+        tmpFrames
+          .filter(f => !Object.values(sectionBrandedPaths).includes(f))
+          .forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
       } catch (videoErr) {
         console.error('[post-thread] Video processing failed, posting without images:', videoErr.message);
-      } finally {
-        [tmpVideo, ...tmpFrames].forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
       }
     }
 
@@ -1649,10 +1720,7 @@ app.post('/post-thread', async (req, res) => {
         tweetshot: null,
         shareOnInstagram: false,
         linkedIn: null,
-        facebook: {
-          text: buildFacebookText(thread),
-          didUserEditFacebookText: true,  // forces Aerielab to use our text, not auto-generated
-        },
+        facebook: null, // FB posting handled directly via Graph API after thread posts (see postToFacebook below)
         delayBetweenTweets: null,
         tweetMetricsUpdatedAt: null,
         categories: category ? [category] : [],
@@ -1709,11 +1777,30 @@ app.post('/post-thread', async (req, res) => {
 
     console.log('[post-thread] Thread posted successfully:', response.data);
 
+    // Send response to caller immediately — don't block on Facebook
     res.json({
       success: true,
       hypefuryPostId: response.data?.postId || null,
       hypefuryResponse: response.data,
     });
+
+    // Post to Facebook Page via Graph API (fire-and-forget after Aerielab success)
+    try {
+      const fbImagePaths = thread.sections
+        ? thread.sections
+            .map(s => sectionBrandedPaths[s.number])
+            .filter(p => p && fs.existsSync(p))
+        : [];
+      const fbText = buildFacebookText(thread);
+      await postToFacebook(fbText, fbImagePaths);
+    } catch (fbErr) {
+      console.error('[fb] Unexpected error posting to Facebook (non-fatal):', fbErr.message);
+    } finally {
+      // Clean up branded PNGs now that FB post is done
+      Object.values(sectionBrandedPaths).forEach(f => {
+        try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
+      });
+    }
 
   } catch (err) {
     console.error('[post-thread] Error:', err.response?.data || err.message);
