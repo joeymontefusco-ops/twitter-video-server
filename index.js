@@ -2277,6 +2277,37 @@ async function captionImage(inputPath, captionText = null) {
 }
 
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
+// ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
+app.post('/test-facebook', async (req, res) => {
+  const { message, imageUrls } = req.body;
+  if (!message || !Array.isArray(imageUrls) || imageUrls.length === 0) {
+    return res.status(400).json({ error: 'Missing message or imageUrls (array)' });
+  }
+
+  const tmpPaths = [];
+  try {
+    // Download each image URL to /tmp
+    for (let i = 0; i < imageUrls.length; i++) {
+      const p = path.join('/tmp', `fbtest_${Date.now()}_${i}.png`);
+      const r = await axios.get(imageUrls[i], { responseType: 'arraybuffer', timeout: 30000 });
+      fs.writeFileSync(p, Buffer.from(r.data));
+      tmpPaths.push(p);
+    }
+
+    const fbPostId = await postToFacebook(message, tmpPaths);
+    if (fbPostId) {
+      res.json({ success: true, fbPostId, message: `Posted with ${tmpPaths.length} images` });
+    } else {
+      res.status(500).json({ success: false, error: 'FB post returned no ID — check Railway logs' });
+    }
+  } catch (err) {
+    console.error('[test-facebook] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    tmpPaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
+  }
+});
+
 app.post('/test-caption', async (req, res) => {
   const { imageUrl, caption } = req.body;
   if (!imageUrl) return res.status(400).json({ error: 'Missing imageUrl' });
