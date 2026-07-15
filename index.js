@@ -1113,7 +1113,7 @@ async function executeDripStep(driveFileId, stage) {
       const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
       const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
       const commentText = isSelfQt
-        ? `Here's the full video breakdown 👇\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
+        ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
         : `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
       await postClipQuoteTweet(driveUrl, quoteTweetData, commentText);
     }
@@ -1720,7 +1720,10 @@ app.post('/post-thread', async (req, res) => {
         tweetshot: null,
         shareOnInstagram: false,
         linkedIn: null,
-        facebook: null, // FB posting handled directly via Graph API after thread posts (see postToFacebook below)
+        facebook: {
+          text: buildFacebookText(thread),
+          didUserEditFacebookText: true,
+        },
         delayBetweenTweets: null,
         tweetMetricsUpdatedAt: null,
         categories: category ? [category] : [],
@@ -1784,23 +1787,27 @@ app.post('/post-thread', async (req, res) => {
       hypefuryResponse: response.data,
     });
 
-    // Post to Facebook Page via Graph API (fire-and-forget after Aerielab success)
-    try {
-      const fbImagePaths = thread.sections
-        ? thread.sections
-            .map(s => sectionBrandedPaths[s.number])
-            .filter(p => p && fs.existsSync(p))
-        : [];
-      const fbText = buildFacebookText(thread);
-      await postToFacebook(fbText, fbImagePaths);
-    } catch (fbErr) {
-      console.error('[fb] Unexpected error posting to Facebook (non-fatal):', fbErr.message);
-    } finally {
-      // Clean up branded PNGs now that FB post is done
-      Object.values(sectionBrandedPaths).forEach(f => {
-        try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
-      });
+    // Post to Facebook Page via Graph API (fire-and-forget, gated by FB_ENABLED)
+    if (process.env.FB_ENABLED === 'true') {
+      try {
+        const fbImagePaths = thread.sections
+          ? thread.sections
+              .map(s => sectionBrandedPaths[s.number])
+              .filter(p => p && fs.existsSync(p))
+          : [];
+        const fbText = buildFacebookText(thread);
+        await postToFacebook(fbText, fbImagePaths);
+      } catch (fbErr) {
+        console.error('[fb] Unexpected error posting to Facebook (non-fatal):', fbErr.message);
+      }
+    } else {
+      console.log('[fb] Direct FB posting disabled (FB_ENABLED != true) — Aerielab crosspost handles FB');
     }
+
+    // Clean up branded PNGs
+    Object.values(sectionBrandedPaths).forEach(f => {
+      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
+    });
 
   } catch (err) {
     console.error('[post-thread] Error:', err.response?.data || err.message);
