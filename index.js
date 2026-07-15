@@ -1089,33 +1089,55 @@ async function executeDripStep(driveFileId, stage) {
 
     console.log(`[drip] Executing stage "${stage}" for ${driveFileId}`);
 
+    // Resolve list of QT user IDs (comma-separated env var, defaults to Manu only)
+    const TMA_USER_ID = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+    const MANU_USER_ID = 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+    const qtUserIds = (process.env.QT_USER_IDS || process.env.QT_USER_ID || MANU_USER_ID)
+      .split(',').map(s => s.trim()).filter(Boolean);
+
     if (stage === 'promo') {
-      // Promo QT: title + "Follow @MaddenAcademy_ for full reveal" + 4 images from hook
-      await postPromoQuoteTweet(row, quoteTweetData, title);
-      // Note: Drive rename + editor notify now happen in the watch loop (immediately after publish)
+      // Promo QT: title + follow line + 4 images from hook (posted from each QT userId)
+      for (const uid of qtUserIds) {
+        try {
+          await postPromoQuoteTweet(row, quoteTweetData, title, uid);
+        } catch (e) {
+          console.error(`[drip-promo] Failed for userId ${uid}:`, e.message);
+        }
+      }
+      // Note: Drive rename + editor notify happen in the watch loop (immediately after publish)
 
     } else if (stage.startsWith('clip')) {
       const clipIndex = parseInt(stage.replace('clip', '')) - 1;
       if (clipData[clipIndex]) {
         const clipUrl = clipData[clipIndex].url;
-        const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
-        const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
-        const commentText = isSelfQt
-          ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
-          : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
-        await postClipQuoteTweet(clipUrl, quoteTweetData, commentText);
+        for (const uid of qtUserIds) {
+          const isSelfQt = uid === TMA_USER_ID;
+          const commentText = isSelfQt
+            ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
+            : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+          try {
+            await postClipQuoteTweet(clipUrl, quoteTweetData, commentText, uid);
+          } catch (e) {
+            console.error(`[drip-clip] Failed for userId ${uid}:`, e.message);
+          }
+        }
       } else {
         console.log(`[drip] No clip at index ${clipIndex} — skipping ${stage}`);
       }
 
     } else if (stage === 'fullvideo') {
       const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
-      const qtUserId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
-      const isSelfQt = qtUserId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
-      const commentText = isSelfQt
-        ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
-        : `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
-      await postClipQuoteTweet(driveUrl, quoteTweetData, commentText);
+      for (const uid of qtUserIds) {
+        const isSelfQt = uid === TMA_USER_ID;
+        const commentText = isSelfQt
+          ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
+          : `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
+        try {
+          await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
+        } catch (e) {
+          console.error(`[drip-fullvideo] Failed for userId ${uid}:`, e.message);
+        }
+      }
     }
 
     // Move to next stage
@@ -1179,7 +1201,7 @@ async function tryStartDrip(driveFileId) {
 }
 
 // ─── Helper: post promo quote tweet (title + 4 images) ───────────────────
-async function postPromoQuoteTweet(row, quoteTweetData, title) {
+async function postPromoQuoteTweet(row, quoteTweetData, title, overrideUserId = null) {
   // Get the thread doc from Firestore to find the hook tweet's images
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
@@ -1225,7 +1247,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
   console.log(`[drip-promo] Uploaded ${uploadedMedia.length} images for Manu's promo tweet`);
 
   // Build the promo tweet
-  const userId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2'; // default Manu, override to TMA via env
+  const userId = overrideUserId || process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
   const isSelfQt = userId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
   const status = isSelfQt
     ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
@@ -1315,11 +1337,11 @@ async function postPromoQuoteTweet(row, quoteTweetData, title) {
 }
 
 // ─── Helper: post clip or full-video quote tweet ─────────────────────────
-async function postClipQuoteTweet(videoUrl, quoteTweetData, commentText) {
+async function postClipQuoteTweet(videoUrl, quoteTweetData, commentText, overrideUserId = null) {
   // Reuse the existing /quote-tweet-hypefury logic internally
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
-  const userId = process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
+  const userId = overrideUserId || process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
 
   const tmpVideo = path.join('/tmp', `drip_${Date.now()}_${uuidv4()}.mp4`);
 
@@ -2400,16 +2422,22 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
               });
               console.log(`[watch] Sheet updated for ${driveFileId}`);
 
-              // Rename Drive file + notify editor immediately after publish
-              try {
-                const title = (firstTweetText || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
-                if (title) {
-                  await renameDriveFile(driveFileId, title);
-                  await notifyEditorDiscord(title, driveFileId);
-                  console.log(`[watch] Drive renamed + editor notified for ${driveFileId}`);
+              // Rename Drive file + notify editor — but only if not already notified for this row
+              const alreadyNotified = row.editorNotified === 'true' || row.editorNotified === true;
+              if (!alreadyNotified) {
+                try {
+                  const title = (firstTweetText || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
+                  if (title) {
+                    await renameDriveFile(driveFileId, title);
+                    await notifyEditorDiscord(title, driveFileId);
+                    await updateSheetRow(row._rowIndex, { editorNotified: 'true' });
+                    console.log(`[watch] Drive renamed + editor notified for ${driveFileId}`);
+                  }
+                } catch (e) {
+                  console.error(`[watch] Rename/notify failed (non-fatal):`, e.message);
                 }
-              } catch (e) {
-                console.error(`[watch] Rename/notify failed (non-fatal):`, e.message);
+              } else {
+                console.log(`[watch] Editor already notified for ${driveFileId} — skipping`);
               }
 
               await tryStartDrip(driveFileId);
