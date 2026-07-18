@@ -1110,11 +1110,11 @@ async function executeDripStep(driveFileId, stage) {
       const clipIndex = parseInt(stage.replace('clip', '')) - 1;
       if (clipData[clipIndex]) {
         const clipUrl = clipData[clipIndex].url;
+        const partNum = clipIndex + 1;
         for (const uid of qtUserIds) {
           const isSelfQt = uid === TMA_USER_ID;
-          const commentText = isSelfQt
-            ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
-            : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+          const handle = isSelfQt ? '@MaddenAcademy_' : '@ManuGinobili987';
+          const commentText = `${title} Part ${partNum}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
           try {
             await postClipQuoteTweet(clipUrl, quoteTweetData, commentText, uid);
           } catch (e) {
@@ -1129,9 +1129,8 @@ async function executeDripStep(driveFileId, stage) {
       const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
       for (const uid of qtUserIds) {
         const isSelfQt = uid === TMA_USER_ID;
-        const commentText = isSelfQt
-          ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
-          : `Here's the full video breakdown 👇\n\nFollow @ManuGinobili987 for daily Madden tips`;
+        const handle = isSelfQt ? '@MaddenAcademy_' : '@ManuGinobili987';
+        const commentText = `${title}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
         try {
           await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
         } catch (e) {
@@ -1249,9 +1248,8 @@ async function postPromoQuoteTweet(row, quoteTweetData, title, overrideUserId = 
   // Build the promo tweet
   const userId = overrideUserId || process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
   const isSelfQt = userId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
-  const status = isSelfQt
-    ? `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's mental chess match`
-    : `${title}\n\nFollow @MaddenAcademy_ for full reveal`;
+  const handle = isSelfQt ? '@MaddenAcademy_' : '@ManuGinobili987';
+  const status = `${title}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
 
   const payload = {
     currentUserId: userId,
