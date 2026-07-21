@@ -1784,19 +1784,26 @@ app.post('/post-thread', async (req, res) => {
 
     console.log(`[post-thread] Posting thread with ${tweets.length} tweets to Hypefury...`);
 
-    const response = await axios.post(
-      'https://app.aerielab.co/api/posts/save',
-      payload,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Content-Type': 'application/json',
-          'Origin': 'https://app.aerielab.co',
-          'Referer': 'https://app.aerielab.co/queue',
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
-        },
-      }
-    );
+    const skipHypefury = req.body.skipHypefury === true || req.query.skipHypefury === 'true';
+    let response;
+    if (skipHypefury) {
+      console.log('[post-thread] skipHypefury=true — SKIPPING Aerielab post (test mode)');
+      response = { data: { postId: `TEST_${Date.now()}`, testMode: true } };
+    } else {
+      response = await axios.post(
+        'https://app.aerielab.co/api/posts/save',
+        payload,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json',
+            'Origin': 'https://app.aerielab.co',
+            'Referer': 'https://app.aerielab.co/queue',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36',
+          },
+        }
+      );
+    }
 
     console.log('[post-thread] Thread posted successfully:', response.data);
 
