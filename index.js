@@ -1740,7 +1740,7 @@ app.post('/post-thread', async (req, res) => {
         tweetshot: null,
         shareOnInstagram: false,
         linkedIn: null,
-        facebook: {
+        facebook: process.env.FB_ENABLED === 'true' ? null : {
           text: buildFacebookText(thread),
           didUserEditFacebookText: true,
         },
