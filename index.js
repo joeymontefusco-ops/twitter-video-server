@@ -2287,15 +2287,10 @@ async function captionImage(inputPath, captionText = null) {
 
   // ── If caption provided, add caption area below image (Facebook mode) ──
   if (captionText) {
-    const emojiMap = {
-      '1️⃣': '1.', '2️⃣': '2.', '3️⃣': '3.', '4️⃣': '4.', '5️⃣': '5.',
-      '6️⃣': '6.', '7️⃣': '7.', '8️⃣': '8.', '9️⃣': '9.', '🔟': '10.',
-    };
-    let cleaned = String(captionText);
-    for (const [emoji, replacement] of Object.entries(emojiMap)) {
-      cleaned = cleaned.split(emoji).join(replacement);
-    }
-    cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
+    let cleaned = String(captionText).trim();
+    // Note: Keep keycap number emojis (1️⃣, 2️⃣, ...). Strip everything else that
+    // won't render. If Noto Color Emoji is available in the container, keycap
+    // numbers render as intended. Otherwise they may render as tofu boxes.
 
     const fontSize = Math.max(Math.floor(width * 0.028), 22);
     const padX = Math.floor(width * 0.05);
@@ -2306,8 +2301,9 @@ async function captionImage(inputPath, captionText = null) {
     const textBlockHeight = lines.length * lineSpacing;
     const captionAreaHeight = padY * 2 + textBlockHeight;
     const startY = padY + fontSize;
+    const fontStack = 'Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji, DejaVu Sans, Arial, sans-serif';
     const textNodes = lines.map((line, i) =>
-      `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
+      `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="${fontStack}" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
     ).join('');
     const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}</svg>`;
 
