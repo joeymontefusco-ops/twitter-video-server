@@ -735,6 +735,51 @@ async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
 }
 
 
+
+// ─── Build a 2x2 testimonial collage from up to 4 testimonial images ──────
+async function buildTestimonialCollage(imagePaths) {
+  if (!imagePaths || imagePaths.length === 0) return null;
+  const sharp = require('sharp');
+  const size = 800; // each tile 800x800, final 1600x1600
+  const gap = 12;
+  const bgColor = { r: 255, g: 255, b: 255, alpha: 1 };
+
+  // Resize up to 4 images into equal square tiles
+  const tiles = [];
+  for (let i = 0; i < Math.min(4, imagePaths.length); i++) {
+    try {
+      const buf = await sharp(imagePaths[i])
+        .resize(size, size, { fit: 'contain', background: bgColor })
+        .png()
+        .toBuffer();
+      tiles.push(buf);
+    } catch (e) {
+      console.error(`[fb-collage] Failed to process testimonial ${i + 1}:`, e.message);
+    }
+  }
+  if (tiles.length === 0) return null;
+
+  // If we only have 1-2 tiles, keep the layout but fill missing slots with white
+  const whiteBuffer = await sharp({
+    create: { width: size, height: size, channels: 4, background: bgColor }
+  }).png().toBuffer();
+  while (tiles.length < 4) tiles.push(whiteBuffer);
+
+  const totalW = size * 2 + gap;
+  const totalH = size * 2 + gap;
+  return await sharp({
+    create: { width: totalW, height: totalH, channels: 4, background: bgColor }
+  })
+    .composite([
+      { input: tiles[0], top: 0, left: 0 },
+      { input: tiles[1], top: 0, left: size + gap },
+      { input: tiles[2], top: size + gap, left: 0 },
+      { input: tiles[3], top: size + gap, left: size + gap },
+    ])
+    .png()
+    .toBuffer();
+}
+
 // ─── Facebook Graph API: post to TMA's Page with multiple photos ──────────
 async function postToFacebook(message, imagePaths) {
   const pageId = process.env.FB_PAGE_ID;
@@ -938,6 +983,9 @@ function buildFacebookText(thread) {
     const emoji = numberEmojis[i] || `${i + 1}.`;
     parts.push(`${emoji} ${firstLine}`);
   });
+
+  // Testimonial marker (before CTA) — points to the collage image at end of gallery
+  parts.push('🗣️ Real results from Owners Of 16 Spaces System 👇');
 
   const cta = (thread.cta || '')
     .replace(/tweet/gi, 'post')
@@ -1676,6 +1724,7 @@ app.post('/post-thread', async (req, res) => {
     });
 
     // Insert up to 4 random member review images as the 2nd-to-last tweet (before CTA)
+    let testimonialLocalPaths = []; // kept for FB collage generation later
     try {
       const imgUrls = await getRandomTestimonialImage();
       if (imgUrls && imgUrls.length > 0) {
@@ -1686,8 +1735,12 @@ app.post('/post-thread', async (req, res) => {
             const dl = await axios.get(imgUrls[i], { responseType: 'arraybuffer', timeout: 30000 });
             fs.writeFileSync(tmpReview, dl.data);
             const media = await uploadImageVerified(tmpReview, token);
-            try { fs.unlinkSync(tmpReview); } catch (e) {}
-            if (media) uploadedReviews.push(media);
+            if (media) {
+              uploadedReviews.push(media);
+              testimonialLocalPaths.push(tmpReview); // keep for FB (deleted later)
+            } else {
+              try { fs.unlinkSync(tmpReview); } catch (e) {}
+            }
           } catch (e) {
             console.error(`[post-thread] Testimonial image ${i + 1} failed:`, e.message);
           }
@@ -1845,19 +1898,36 @@ app.post('/post-thread', async (req, res) => {
           }
         }
 
+        // Add testimonial collage as final image in the FB gallery
+        if (testimonialLocalPaths && testimonialLocalPaths.length > 0) {
+          try {
+            const collageBuf = await buildTestimonialCollage(testimonialLocalPaths);
+            if (collageBuf) {
+              const collagePath = path.join('/tmp', `fb_testimonials_${Date.now()}.png`);
+              fs.writeFileSync(collagePath, collageBuf);
+              fbCaptionedPaths.push(collagePath);
+              console.log(`[fb] Built testimonial collage from ${testimonialLocalPaths.length} images`);
+            }
+          } catch (e) {
+            console.error('[fb] Failed to build testimonial collage:', e.message);
+          }
+        }
+
         const fbText = buildFacebookText(thread);
         await postToFacebook(fbText, fbCaptionedPaths);
       } catch (fbErr) {
         console.error('[fb] Unexpected error posting to Facebook (non-fatal):', fbErr.message);
       } finally {
-        // Clean up FB-captioned PNGs + raw frames
+        // Clean up FB-captioned PNGs, raw frames, testimonial local PNGs
         fbCaptionedPaths.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
         Object.values(sectionRawFrames).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
+        (testimonialLocalPaths || []).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
       }
     } else {
       console.log('[fb] Direct FB posting disabled (FB_ENABLED != true) — Aerielab crosspost handles FB');
-      // Clean up raw frames (not needed if we're not posting to FB)
+      // Clean up raw frames + testimonial local paths (not needed if we're not posting to FB)
       Object.values(sectionRawFrames).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
+      (testimonialLocalPaths || []).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
     }
 
   } catch (err) {
@@ -2287,24 +2357,43 @@ async function captionImage(inputPath, captionText = null) {
 
   // ── If caption provided, add caption area below image (Facebook mode) ──
   if (captionText) {
-    let cleaned = String(captionText).trim();
-    // Note: Keep keycap number emojis (1️⃣, 2️⃣, ...). Strip everything else that
-    // won't render. If Noto Color Emoji is available in the container, keycap
-    // numbers render as intended. Otherwise they may render as tofu boxes.
+    // Convert keycap emojis (1️⃣, 2️⃣...) and standalone digits at start to plain "N." prefix
+    const emojiMap = {
+      '1️⃣': '1.', '2️⃣': '2.', '3️⃣': '3.', '4️⃣': '4.', '5️⃣': '5.',
+      '6️⃣': '6.', '7️⃣': '7.', '8️⃣': '8.', '9️⃣': '9.', '🔟': '10.',
+    };
+    let cleaned = String(captionText);
+    for (const [emoji, replacement] of Object.entries(emojiMap)) {
+      cleaned = cleaned.split(emoji).join(replacement);
+    }
+    cleaned = cleaned.replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}\uFE0F]/gu, '').trim();
+
+    // Detect leading number prefix (e.g., "1.") for styled rendering
+    const leadingMatch = cleaned.match(/^(\d{1,2}\.)\s*(.*)$/s);
+    const leadingNum = leadingMatch ? leadingMatch[1] : '';
+    const captionBody = leadingMatch ? leadingMatch[2].trim() : cleaned;
 
     const fontSize = Math.max(Math.floor(width * 0.028), 22);
     const padX = Math.floor(width * 0.05);
     const padY = Math.floor(fontSize * 0.9);
     const lineSpacing = Math.floor(fontSize * 1.35);
     const maxCharsPerLine = Math.floor((width - padX * 2) / (fontSize * 0.5));
-    const lines = wrapText(cleaned, maxCharsPerLine, 3);
+    const lines = wrapText(captionBody, maxCharsPerLine, 3);
     const textBlockHeight = lines.length * lineSpacing;
     const captionAreaHeight = padY * 2 + textBlockHeight;
     const startY = padY + fontSize;
-    const fontStack = 'Noto Color Emoji, Apple Color Emoji, Segoe UI Emoji, DejaVu Sans, Arial, sans-serif';
-    const textNodes = lines.map((line, i) =>
-      `<text x="${padX}" y="${startY + i * lineSpacing}" font-family="${fontStack}" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`
-    ).join('');
+
+    // Estimate width of leading number for offsetting body text
+    const numOffset = leadingNum ? Math.floor(fontSize * 0.65 * (leadingNum.length + 1)) : 0;
+
+    let textNodes = '';
+    if (leadingNum) {
+      textNodes += `<text x="${padX}" y="${startY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="700" fill="#1e6ec8">${escapeXml(leadingNum)}</text>`;
+    }
+    textNodes += lines.map((line, i) => {
+      const xPos = (i === 0 && leadingNum) ? padX + numOffset : padX;
+      return `<text x="${xPos}" y="${startY + i * lineSpacing}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${fontSize}" font-weight="500" fill="#1a1a1a">${escapeXml(line)}</text>`;
+    }).join('');
     const captionSvg = `<svg width="${width}" height="${captionAreaHeight}" xmlns="http://www.w3.org/2000/svg"><rect width="${width}" height="${captionAreaHeight}" fill="white"/>${textNodes}</svg>`;
 
     composites.push({
