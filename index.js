@@ -1598,7 +1598,8 @@ app.post('/post-thread', async (req, res) => {
     const tmpVideo = path.join('/tmp', `post_video_${Date.now()}.mp4`);
     const tmpFrames = [];
     let sectionMediaMap = {};
-    const sectionBrandedPaths = {}; // section number → local branded PNG path (for FB post)
+    const sectionRawFrames = {}; // section number → raw frame path (for FB caption regeneration)
+    const sectionContent = {};   // section number → text content (for FB captions)
 
     if (driveFileId && thread.sections && thread.sections.length > 0) {
       try {
@@ -1620,15 +1621,19 @@ app.post('/post-thread', async (req, res) => {
           try {
             await extractFrame(tmpVideo, section.timestamp_sec || 0, framePath);
             if (fs.existsSync(framePath)) {
-              // Apply branding (logo + URL + slogan) — used on both Twitter and Facebook
+              // Twitter version: branded, no caption
               const brandedBuffer = await captionImage(framePath, null);
               fs.writeFileSync(brandedPath, brandedBuffer);
-              sectionBrandedPaths[section.number] = brandedPath; // keep for FB post
+              // Keep raw frame + section content for FB captioning later
+              sectionRawFrames[section.number] = framePath;
+              sectionContent[section.number] = (section.content || '').trim();
               const mediaInfo = await uploadImageVerified(brandedPath, token);
               if (mediaInfo) {
                 sectionMediaMap[section.number] = mediaInfo;
                 console.log(`[post-thread] Section ${section.number} branded image uploaded: ${mediaInfo.name}`);
               }
+              // Delete branded PNG immediately after upload (Twitter uses Firebase URL, not local)
+              try { if (fs.existsSync(brandedPath)) fs.unlinkSync(brandedPath); } catch (e) {}
             }
           } catch (frameErr) {
             console.error(`[post-thread] Frame/upload failed for section ${section.number}:`, frameErr.message);
@@ -1639,11 +1644,8 @@ app.post('/post-thread', async (req, res) => {
             }
           }
         }
-        // Clean up: video + non-branded frame (keep branded PNGs for FB post below)
+        // Clean up video only (keep raw frames for FB caption generation)
         try { if (fs.existsSync(tmpVideo)) fs.unlinkSync(tmpVideo); } catch (e) {}
-        tmpFrames
-          .filter(f => !Object.values(sectionBrandedPaths).includes(f))
-          .forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
       } catch (videoErr) {
         console.error('[post-thread] Video processing failed, posting without images:', videoErr.message);
       }
@@ -1816,25 +1818,37 @@ app.post('/post-thread', async (req, res) => {
 
     // Post to Facebook Page via Graph API (fire-and-forget, gated by FB_ENABLED)
     if (process.env.FB_ENABLED === 'true') {
+      const fbCaptionedPaths = [];
       try {
-        const fbImagePaths = thread.sections
-          ? thread.sections
-              .map(s => sectionBrandedPaths[s.number])
-              .filter(p => p && fs.existsSync(p))
-          : [];
+        // Generate captioned versions per section (branding + section text below)
+        for (const s of (thread.sections || [])) {
+          const rawFrame = sectionRawFrames[s.number];
+          const captionText = sectionContent[s.number];
+          if (!rawFrame || !fs.existsSync(rawFrame) || !captionText) continue;
+          const captionedPath = path.join('/tmp', `fb_captioned_${Date.now()}_${s.number}.png`);
+          try {
+            const buf = await captionImage(rawFrame, captionText);
+            fs.writeFileSync(captionedPath, buf);
+            fbCaptionedPaths.push(captionedPath);
+          } catch (e) {
+            console.error(`[fb] Failed to caption section ${s.number}:`, e.message);
+          }
+        }
+
         const fbText = buildFacebookText(thread);
-        await postToFacebook(fbText, fbImagePaths);
+        await postToFacebook(fbText, fbCaptionedPaths);
       } catch (fbErr) {
         console.error('[fb] Unexpected error posting to Facebook (non-fatal):', fbErr.message);
+      } finally {
+        // Clean up FB-captioned PNGs + raw frames
+        fbCaptionedPaths.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
+        Object.values(sectionRawFrames).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
       }
     } else {
       console.log('[fb] Direct FB posting disabled (FB_ENABLED != true) — Aerielab crosspost handles FB');
+      // Clean up raw frames (not needed if we're not posting to FB)
+      Object.values(sectionRawFrames).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
     }
-
-    // Clean up branded PNGs
-    Object.values(sectionBrandedPaths).forEach(f => {
-      try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {}
-    });
 
   } catch (err) {
     console.error('[post-thread] Error:', err.response?.data || err.message);
