@@ -943,6 +943,9 @@ function buildFacebookText(thread) {
     .replace(/tweet/gi, 'post')
     .replace(/Like ❤️ the tweet/gi, 'Like 👍 this post')
     .replace(/Follow @MaddenAcademy_/gi, 'Follow The Madden Academy')
+    .replace(/mastering Madden 26's chess match/gi, 'mastering Madden chess match')
+    .replace(/^.*For more help on that you can start with our free challenge in our bio.*$/gim, '')
+    .replace(/\n{3,}/g, '\n\n')
     .trim();
   if (cta) parts.push(cta);
 
