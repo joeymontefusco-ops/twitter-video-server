@@ -944,6 +944,7 @@ function buildFacebookText(thread) {
     .replace(/Like ❤️ the tweet/gi, 'Like 👍 this post')
     .replace(/Follow @MaddenAcademy_/gi, 'Follow The Madden Academy')
     .replace(/mastering Madden 26's chess match/gi, 'mastering Madden chess match')
+    .replace(/themanacademy\.com/gi, 'themaddenacademy.com')
     .replace(/^.*For more help on that you can start with our free challenge in our bio.*$/gim, '')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
@@ -1824,12 +1825,16 @@ app.post('/post-thread', async (req, res) => {
     // Post to Facebook Page via Graph API (fire-and-forget, gated by FB_ENABLED)
     if (process.env.FB_ENABLED === 'true') {
       const fbCaptionedPaths = [];
+      const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
       try {
         // Generate captioned versions per section (branding + section text below)
-        for (const s of (thread.sections || [])) {
+        for (let i = 0; i < (thread.sections || []).length; i++) {
+          const s = thread.sections[i];
           const rawFrame = sectionRawFrames[s.number];
-          const captionText = sectionContent[s.number];
-          if (!rawFrame || !fs.existsSync(rawFrame) || !captionText) continue;
+          const rawCaption = sectionContent[s.number];
+          if (!rawFrame || !fs.existsSync(rawFrame) || !rawCaption) continue;
+          const emoji = numberEmojis[i] || `${i + 1}.`;
+          const captionText = `${emoji} ${rawCaption}`;
           const captionedPath = path.join('/tmp', `fb_captioned_${Date.now()}_${s.number}.png`);
           try {
             const buf = await captionImage(rawFrame, captionText);
