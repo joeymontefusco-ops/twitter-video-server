@@ -737,10 +737,11 @@ async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
 
 
 // ─── Build a 2x2 testimonial collage from up to 4 testimonial images ──────
+// Includes: 16 Spaces Playbook image overlaid in center + TMA watermark top-left
 async function buildTestimonialCollage(imagePaths) {
   if (!imagePaths || imagePaths.length === 0) return null;
   const sharp = require('sharp');
-  const size = 800; // each tile 800x800, final 1600x1600
+  const size = 800; // each tile 800x800, final ~1600x1600
   const gap = 12;
   const bgColor = { r: 255, g: 255, b: 255, alpha: 1 };
 
@@ -759,7 +760,7 @@ async function buildTestimonialCollage(imagePaths) {
   }
   if (tiles.length === 0) return null;
 
-  // If we only have 1-2 tiles, keep the layout but fill missing slots with white
+  // Fill missing slots with white
   const whiteBuffer = await sharp({
     create: { width: size, height: size, channels: 4, background: bgColor }
   }).png().toBuffer();
@@ -767,17 +768,52 @@ async function buildTestimonialCollage(imagePaths) {
 
   const totalW = size * 2 + gap;
   const totalH = size * 2 + gap;
-  return await sharp({
+
+  // Build the 2x2 base
+  const composites = [
+    { input: tiles[0], top: 0, left: 0 },
+    { input: tiles[1], top: 0, left: size + gap },
+    { input: tiles[2], top: size + gap, left: 0 },
+    { input: tiles[3], top: size + gap, left: size + gap },
+  ];
+
+  // Overlay the 16 Spaces Playbook image in the center (covers overlap zone of the tiles)
+  try {
+    const playbookPath = path.join(__dirname, '16-spaces-playbook.png');
+    if (fs.existsSync(playbookPath)) {
+      const overlaySize = Math.floor(totalW * 0.42); // ~42% of collage width
+      const playbookBuf = await sharp(playbookPath)
+        .resize(overlaySize, overlaySize, { fit: 'contain', background: { r: 255, g: 255, b: 255, alpha: 0 } })
+        .png()
+        .toBuffer();
+      const centerX = Math.floor((totalW - overlaySize) / 2);
+      const centerY = Math.floor((totalH - overlaySize) / 2);
+      composites.push({ input: playbookBuf, top: centerY, left: centerX });
+    } else {
+      console.warn('[fb-collage] 16-spaces-playbook.png not found — skipping center overlay');
+    }
+  } catch (e) {
+    console.error('[fb-collage] Failed to overlay playbook image:', e.message);
+  }
+
+  const baseCollage = await sharp({
     create: { width: totalW, height: totalH, channels: 4, background: bgColor }
   })
-    .composite([
-      { input: tiles[0], top: 0, left: 0 },
-      { input: tiles[1], top: 0, left: size + gap },
-      { input: tiles[2], top: size + gap, left: 0 },
-      { input: tiles[3], top: size + gap, left: size + gap },
-    ])
+    .composite(composites)
     .png()
     .toBuffer();
+
+  // Apply TMA watermark (logo + URL + MENTAL slogan) via captionImage with null caption
+  try {
+    const tmpCollage = path.join('/tmp', `collage_base_${Date.now()}.png`);
+    fs.writeFileSync(tmpCollage, baseCollage);
+    const branded = await captionImage(tmpCollage, null);
+    try { fs.unlinkSync(tmpCollage); } catch (e) {}
+    return branded;
+  } catch (e) {
+    console.error('[fb-collage] Failed to apply watermark, returning base:', e.message);
+    return baseCollage;
+  }
 }
 
 // ─── Facebook Graph API: post to TMA's Page with multiple photos ──────────
