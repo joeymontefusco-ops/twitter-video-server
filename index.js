@@ -930,11 +930,13 @@ function buildFacebookText(thread) {
   if (hookLines) parts.push(hookLines);
 
   (thread.sections || []).forEach((s, i) => {
-    const sectionText = (s.content || '').trim();
-    if (sectionText) {
-      const emoji = numberEmojis[i] || `${i + 1}.`;
-      parts.push(`${emoji} ${sectionText}`);
-    }
+    const fullText = (s.content || '').trim();
+    if (!fullText) return;
+    // Only include the FIRST non-empty line of each section
+    const firstLine = fullText.split('\n').map(l => l.trim()).find(l => l.length > 0);
+    if (!firstLine) return;
+    const emoji = numberEmojis[i] || `${i + 1}.`;
+    parts.push(`${emoji} ${firstLine}`);
   });
 
   const cta = (thread.cta || '')
