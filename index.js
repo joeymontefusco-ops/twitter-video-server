@@ -736,6 +736,91 @@ async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
 
 
 
+
+// ─── Build a full styled FB section image with header/title/play-art/notes/footer
+async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex, totalSections) {
+  const sharp = require('sharp');
+  const W = 1200;
+  const headerH = 90;
+  const titleAreaH = 110;
+  const playartH = 675;   // 16:9 at 1200 wide
+  const footerH = 90;
+  const notesPadX = 45;
+  const notesPadY = 35;
+  const notesHeaderH = 55;
+  const noteFontSize = 30;
+  const noteLineHeight = Math.floor(noteFontSize * 1.5);
+  const darkBlue = '#0d2340';
+  const primaryBlue = '#1e6ec8';
+  const bgColor = { r: 255, g: 255, b: 255, alpha: 1 };
+
+  // Parse section content: first non-empty line = title, rest = bullets
+  const contentLines = (sectionData.content || '')
+    .split('\n')
+    .map(l => l.trim().replace(/^♟️\s*/, '').trim())
+    .filter(l => l.length > 0);
+  const sectionTitle = contentLines[0] || `Section ${sectionIndex + 1}`;
+  const rawBullets = contentLines.slice(1);
+
+  // Wrap long bullet lines
+  const maxCharsPerLine = Math.floor((W - notesPadX * 2 - 20) / (noteFontSize * 0.53));
+  const bulletBlocks = rawBullets.map(b => wrapText(b, maxCharsPerLine, 2));
+  const totalBulletLines = bulletBlocks.reduce((sum, block) => sum + block.length, 0);
+  const notesH = notesPadY * 2 + notesHeaderH + totalBulletLines * noteLineHeight + 20;
+  const H = headerH + titleAreaH + playartH + notesH + footerH;
+
+  // Play-art: cover the full 1200 x 675 area
+  const playartBuf = await sharp(rawFramePath)
+    .resize(W, playartH, { fit: 'cover', position: 'center' })
+    .png()
+    .toBuffer();
+
+  const maxTitleChars = 34;
+  const displayTitle = sectionTitle.length > maxTitleChars
+    ? sectionTitle.substring(0, maxTitleChars - 2).trim() + '…'
+    : sectionTitle;
+
+  let bulletY = headerH + titleAreaH + playartH + notesPadY + notesHeaderH + 10;
+  const bulletTextNodes = [];
+  bulletBlocks.forEach((block) => {
+    block.forEach((line, lineIdx) => {
+      const prefix = lineIdx === 0 ? '•  ' : '    ';
+      bulletTextNodes.push(
+        `<text x="${notesPadX}" y="${bulletY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${noteFontSize}" font-weight="400" fill="#1a1a1a">${escapeXml(prefix + line)}</text>`
+      );
+      bulletY += noteLineHeight;
+    });
+    bulletY += 6;
+  });
+
+  const counterText = `${sectionIndex + 1} / ${totalSections}`;
+
+  const svgOverlays = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
+  <rect x="0" y="0" width="${W}" height="${headerH}" fill="${darkBlue}"/>
+  <text x="30" y="${Math.floor(headerH * 0.62)}" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" font-weight="700" fill="white">FULL VID BREAKDOWN</text>
+  <text x="${W - 30}" y="${Math.floor(headerH * 0.62)}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="700" fill="white">themaddenacademy.com</text>
+  <rect x="45" y="${headerH + 18}" width="${W - 90}" height="${titleAreaH - 36}" rx="14" ry="14" fill="${primaryBlue}"/>
+  <rect x="${W - 145}" y="${headerH + 30}" width="80" height="${titleAreaH - 60}" rx="8" ry="8" fill="white" opacity="0.18"/>
+  <text x="${W - 105}" y="${headerH + Math.floor(titleAreaH / 2) + 10}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" font-weight="700" fill="white">${escapeXml(counterText)}</text>
+  <text x="${Math.floor((W - 90) / 2) + 30}" y="${headerH + Math.floor(titleAreaH / 2) + 10}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="32" font-weight="700" fill="white">${escapeXml(displayTitle)}</text>
+  <text x="${notesPadX}" y="${headerH + titleAreaH + playartH + notesPadY + 40}" font-family="DejaVu Sans, Arial, sans-serif" font-size="34" font-weight="700" fill="${darkBlue}">Notes &amp; Summary:</text>
+  ${bulletTextNodes.join('\n  ')}
+  <rect x="0" y="${H - footerH}" width="${W}" height="${footerH}" fill="${darkBlue}"/>
+  <text x="30" y="${H - Math.floor(footerH * 0.38)}" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" font-weight="700" fill="white">MORE MADDEN CONTENT</text>
+  <text x="${W - 30}" y="${H - Math.floor(footerH * 0.38)}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="700"><tspan fill="#4a90d9">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text>
+</svg>`;
+
+  return await sharp({
+    create: { width: W, height: H, channels: 4, background: bgColor }
+  })
+    .composite([
+      { input: playartBuf, top: headerH + titleAreaH, left: 0 },
+      { input: Buffer.from(svgOverlays), top: 0, left: 0 },
+    ])
+    .png()
+    .toBuffer();
+}
+
 // ─── Build a 2x2 testimonial collage from up to 4 testimonial images ──────
 // Includes: 16 Spaces Playbook image overlaid in center + TMA watermark top-left
 async function buildTestimonialCollage(imagePaths) {
@@ -1916,21 +2001,19 @@ app.post('/post-thread', async (req, res) => {
       const fbCaptionedPaths = [];
       const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
       try {
-        // Generate captioned versions per section (branding + section text below)
-        for (let i = 0; i < (thread.sections || []).length; i++) {
+        // Build fully-styled FB section images (header, title, play-art, notes, footer)
+        const totalSections = (thread.sections || []).length;
+        for (let i = 0; i < totalSections; i++) {
           const s = thread.sections[i];
           const rawFrame = sectionRawFrames[s.number];
-          const rawCaption = sectionContent[s.number];
-          if (!rawFrame || !fs.existsSync(rawFrame) || !rawCaption) continue;
-          const emoji = numberEmojis[i] || `${i + 1}.`;
-          const captionText = `${emoji} ${rawCaption}`;
-          const captionedPath = path.join('/tmp', `fb_captioned_${Date.now()}_${s.number}.png`);
+          if (!rawFrame || !fs.existsSync(rawFrame)) continue;
+          const styledPath = path.join('/tmp', `fb_section_${Date.now()}_${s.number}.png`);
           try {
-            const buf = await captionImage(rawFrame, captionText);
-            fs.writeFileSync(captionedPath, buf);
-            fbCaptionedPaths.push(captionedPath);
+            const buf = await buildFacebookSectionImage(rawFrame, s, i, totalSections);
+            fs.writeFileSync(styledPath, buf);
+            fbCaptionedPaths.push(styledPath);
           } catch (e) {
-            console.error(`[fb] Failed to caption section ${s.number}:`, e.message);
+            console.error(`[fb] Failed to build section ${s.number} image:`, e.message);
           }
         }
 
