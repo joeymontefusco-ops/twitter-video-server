@@ -2540,6 +2540,80 @@ async function captionImage(inputPath, captionText = null) {
 
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
 // ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
+// ─── /test-cfb-scrape — scrape cfb.fan play images from playbook + formation ──
+app.post('/test-cfb-scrape', async (req, res) => {
+  const { playbook, formation } = req.body;
+  if (!playbook || !formation) {
+    return res.status(400).json({ error: 'Missing playbook or formation' });
+  }
+  try {
+    const result = await scrapeCfbFan(playbook, formation);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[cfb-scrape] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ─── Scrape cfb.fan for play images given playbook name + formation name ──
+// Returns { formationUrl, imageUrls: [], playNames: [] } or throws.
+async function scrapeCfbFan(playbookName, formationName) {
+  const slugify = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9\-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  const playbookSlug = slugify(playbookName);
+  const formationSlug = slugify(formationName);
+  console.log(`[cfb-scrape] Looking for playbook=${playbookSlug} formation=${formationSlug}`);
+
+  // Try both -off and -def playbook variants
+  const suffixes = ['off', 'def'];
+  let formationUrl = null;
+  let playbookUrl = null;
+  for (const suffix of suffixes) {
+    const url = `https://cfb.fan/playbooks/${playbookSlug}-${suffix}/`;
+    try {
+      const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      // Find any link whose slug ends with the formation slug (may have prefix like gun-)
+      const re = new RegExp(`href="(https?://cfb\\.fan/(?:\\d+/)?playbooks/${playbookSlug}-${suffix}/[a-z0-9\\-]*${formationSlug}/?)"`, 'gi');
+      const matches = [...r.data.matchAll(re)];
+      if (matches.length > 0) {
+        formationUrl = matches[0][1];
+        playbookUrl = url;
+        console.log(`[cfb-scrape] Found formation URL: ${formationUrl}`);
+        break;
+      }
+    } catch (e) {
+      console.log(`[cfb-scrape] Playbook page ${url} failed: ${e.message}`);
+    }
+  }
+
+  if (!formationUrl) throw new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
+
+  // Fetch the formation page and extract play images
+  const formResp = await axios.get(formationUrl, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+  const html = formResp.data;
+
+  // Play images are hosted on assets.cfb.fan under /playbooks/... paths
+  const imgRegex = /(https?:\/\/assets\.cfb\.fan\/[^"'\s]+?\.(?:png|jpg|jpeg|webp))/gi;
+  const rawUrls = [...new Set([...html.matchAll(imgRegex)].map(m => m[1]))];
+  const playImages = rawUrls.filter(u => !u.includes('site-images') && !u.includes('logo') && !u.includes('avatar'));
+
+  // Try to pair image URLs with play names (H2/H3 style card headers)
+  const playNameRegex = /<h[23][^>]*>([A-Z0-9][A-Z0-9 \-&/]*?)<\/h[23]>/g;
+  const playNames = [...html.matchAll(playNameRegex)].map(m => m[1].trim());
+
+  return {
+    playbookUrl,
+    formationUrl,
+    imageUrls: playImages.slice(0, 8), // return up to 8, caller picks 4
+    playNames: playNames.slice(0, 8),
+    totalImagesFound: playImages.length,
+  };
+}
+
 app.post('/test-facebook', async (req, res) => {
   const { message, imageUrls } = req.body;
   if (!message || !Array.isArray(imageUrls) || imageUrls.length === 0) {
