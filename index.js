@@ -2589,7 +2589,7 @@ async function scrapeCfbFan(playbookName, formationName) {
       });
       if (matches.length > 0) {
         const slug = matches[0][1];
-        formationUrl = `https://cfb.fan/playbooks/${playbookSlug}-${suffix}/${slug}/`;
+        formationUrl = `https://cfb.fan/27/playbooks/${playbookSlug}-${suffix}/${slug}/`;
         playbookUrl = url;
         console.log(`[cfb-scrape] Found formation URL: ${formationUrl}`);
         break;
@@ -2607,7 +2607,14 @@ async function scrapeCfbFan(playbookName, formationName) {
   }
 
   // Fetch the formation page and extract play images
-  const formResp = await axios.get(formationUrl, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+  let formResp;
+  try {
+    formResp = await axios.get(formationUrl, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+  } catch (e) {
+    const err = new Error(`Formation page fetch failed (${e.message}) — URL: ${formationUrl}`);
+    err.debug = { ...debugInfo, formationUrl };
+    throw err;
+  }
   const html = formResp.data;
 
   // Play images are hosted on assets.cfb.fan under /playbooks/... paths
