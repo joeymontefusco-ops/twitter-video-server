@@ -2602,46 +2602,57 @@ async function scrapeCfbFan(playbookName, formationName) {
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '');
   const playbookSlug = slugify(playbookName);
-  const formationSlug = slugify(formationName);
-  console.log(`[cfb-scrape] Looking for playbook=${playbookSlug} formation=${formationSlug}`);
+  const formationTarget = slugify(formationName);
+  console.log(`[cfb-scrape] Looking for playbook=${playbookSlug} formation=${formationTarget}`);
 
   // Try both -off and -def playbook variants
   const suffixes = ['off', 'def'];
-  let formationUrl = null;
+  let formationFullSlug = null;
   let playbookUrl = null;
+  let usedSuffix = null;
   const debugInfo = { playbookAttempts: [] };
   for (const suffix of suffixes) {
     const url = `https://cfb.fan/playbooks/${playbookSlug}-${suffix}/`;
     try {
       const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-      // Look for formation slug in path portion (absolute or relative URLs)
-      const re = new RegExp(`(?:https?://cfb\\.fan)?/(?:\\d+/)?playbooks/${playbookSlug}-${suffix}/([a-z0-9\\-]*${formationSlug})/?`, 'gi');
-      const matches = [...r.data.matchAll(re)];
+      // Extract ALL candidate formation slugs from the playbook page
+      const re = new RegExp(`(?:https?://cfb\\.fan)?/(?:\\d+/)?playbooks/${playbookSlug}-${suffix}/([a-z0-9\\-]+)/?`, 'gi');
+      const candidates = [...new Set([...r.data.matchAll(re)].map(m => m[1]))];
       debugInfo.playbookAttempts.push({
         url,
         status: r.status,
         htmlLength: (r.data || '').length,
-        matchCount: matches.length,
-        firstMatch: matches[0] ? matches[0][0] : null,
+        candidateCount: candidates.length,
       });
-      if (matches.length > 0) {
-        const slug = matches[0][1];
-        formationUrl = `https://cfb.fan/27/playbooks/${playbookSlug}-${suffix}/${slug}/`;
-        playbookUrl = url;
-        console.log(`[cfb-scrape] Found formation URL: ${formationUrl}`);
-        break;
+      // Match candidates by normalized form (collapse consecutive dashes)
+      for (const candidate of candidates) {
+        const normalized = candidate.replace(/-+/g, '-');
+        // Match if candidate's normalized form ends with our formation target
+        // (handles both direct match "nickel-3-3-mint" and prefix like "gun-doubles...")
+        if (normalized === formationTarget || normalized.endsWith('-' + formationTarget)) {
+          formationFullSlug = candidate;
+          usedSuffix = suffix;
+          playbookUrl = url;
+          console.log(`[cfb-scrape] Matched candidate="${candidate}" (normalized=${normalized})`);
+          break;
+        }
       }
+      if (formationFullSlug) break;
     } catch (e) {
       debugInfo.playbookAttempts.push({ url, error: e.message });
       console.log(`[cfb-scrape] Playbook page ${url} failed: ${e.message}`);
     }
   }
 
-  if (!formationUrl) {
+  if (!formationFullSlug) {
     const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
     err.debug = debugInfo;
     throw err;
   }
+
+  const formationUrl = `https://cfb.fan/27/playbooks/${playbookSlug}-${usedSuffix}/${formationFullSlug}/`;
+  const sideLabel = usedSuffix === 'def' ? 'defense' : 'offense';
+  console.log(`[cfb-scrape] Found formation URL: ${formationUrl}`);
 
   // Fetch the formation page and extract play images
   let formResp;
@@ -2654,16 +2665,13 @@ async function scrapeCfbFan(playbookName, formationName) {
   }
   const html = formResp.data;
 
-  // Extract play slugs from formation page (each play has a link like /27/playbooks/<pb>/<formation>/<play>/)
-  // The formation URL contains: /27/playbooks/{pb}-{suffix}/{formationTypeAndSlug}/
-  // Parse the formation URL to break into type prefix + slug body
-  const usedSuffix = playbookUrl.match(/-([a-z]+)\/$/)[1]; // "off" or "def"
-  const sideLabel = usedSuffix === 'def' ? 'defense' : 'offense';
-  const formationFullSlug = formationUrl.match(/\/([a-z0-9\-]+)\/$/)[1]; // e.g. "gun-doubles-flex-y-off-close"
-
-  // Split formation slug into type prefix and body
-  // Known formation type prefixes on cfb.fan URLs:
-  const knownTypes = ['gun', 'singleback', 'pistol', 'wildcat', 'i-form', 'goal-line', 'hail-mary'];
+  // Extract formation type prefix (offense + defense)
+  const knownTypes = [
+    // offense
+    'gun', 'singleback', 'pistol', 'wildcat', 'i-form', 'goal-line', 'hail-mary',
+    // defense
+    'nickel', 'dime', 'quarter', '4-3', '3-4', '4-2-5', '3-3-5', '5-2', 'goal-line',
+  ];
   let formationType = null;
   let formationBody = null;
   for (const t of knownTypes) {
@@ -2681,11 +2689,12 @@ async function scrapeCfbFan(playbookName, formationName) {
   }
 
   // Extract play slugs from the formation page's play links
-  const playLinkRegex = new RegExp(`href="[^"]*/${formationFullSlug}/([a-z0-9\\-]+)/?"`, 'gi');
+  const escapedFullSlug = formationFullSlug.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const playLinkRegex = new RegExp(`href="[^"]*/${escapedFullSlug}/([a-z0-9\\-]+)/?"`, 'gi');
   const playSlugs = [...new Set([...html.matchAll(playLinkRegex)].map(m => m[1]))];
 
   // Also extract the display names for these plays (the anchor text)
-  const playNameRegex = new RegExp(`href="[^"]*/${formationFullSlug}/[a-z0-9\\-]+/?"[^>]*>([^<]+)<`, 'gi');
+  const playNameRegex = new RegExp(`href="[^"]*/${escapedFullSlug}/[a-z0-9\\-]+/?"[^>]*>([^<]+)<`, 'gi');
   const playNames = [...html.matchAll(playNameRegex)].map(m => m[1].trim());
 
   // Build media.cfb.fan URLs for each play
