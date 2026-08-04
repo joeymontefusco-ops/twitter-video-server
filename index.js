@@ -2617,21 +2617,54 @@ async function scrapeCfbFan(playbookName, formationName) {
   }
   const html = formResp.data;
 
-  // Play images are hosted on assets.cfb.fan under /playbooks/... paths
-  const imgRegex = /(https?:\/\/assets\.cfb\.fan\/[^"'\s]+?\.(?:png|jpg|jpeg|webp))/gi;
-  const rawUrls = [...new Set([...html.matchAll(imgRegex)].map(m => m[1]))];
-  const playImages = rawUrls.filter(u => !u.includes('site-images') && !u.includes('logo') && !u.includes('avatar'));
+  // Extract play slugs from formation page (each play has a link like /27/playbooks/<pb>/<formation>/<play>/)
+  // The formation URL contains: /27/playbooks/{pb}-{suffix}/{formationTypeAndSlug}/
+  // Parse the formation URL to break into type prefix + slug body
+  const usedSuffix = playbookUrl.match(/-([a-z]+)\/$/)[1]; // "off" or "def"
+  const sideLabel = usedSuffix === 'def' ? 'defense' : 'offense';
+  const formationFullSlug = formationUrl.match(/\/([a-z0-9\-]+)\/$/)[1]; // e.g. "gun-doubles-flex-y-off-close"
 
-  // Try to pair image URLs with play names (H2/H3 style card headers)
-  const playNameRegex = /<h[23][^>]*>([A-Z0-9][A-Z0-9 \-&/]*?)<\/h[23]>/g;
+  // Split formation slug into type prefix and body
+  // Known formation type prefixes on cfb.fan URLs:
+  const knownTypes = ['gun', 'singleback', 'pistol', 'wildcat', 'i-form', 'goal-line', 'hail-mary'];
+  let formationType = null;
+  let formationBody = null;
+  for (const t of knownTypes) {
+    if (formationFullSlug === t || formationFullSlug.startsWith(t + '-')) {
+      formationType = t;
+      formationBody = formationFullSlug === t ? '' : formationFullSlug.substring(t.length + 1);
+      break;
+    }
+  }
+  if (!formationType) {
+    // Fallback: assume first segment is the type
+    const firstDash = formationFullSlug.indexOf('-');
+    formationType = firstDash >= 0 ? formationFullSlug.substring(0, firstDash) : formationFullSlug;
+    formationBody = firstDash >= 0 ? formationFullSlug.substring(firstDash + 1) : '';
+  }
+
+  // Extract play slugs from the formation page's play links
+  const playLinkRegex = new RegExp(`href="[^"]*/${formationFullSlug}/([a-z0-9\\-]+)/?"`, 'gi');
+  const playSlugs = [...new Set([...html.matchAll(playLinkRegex)].map(m => m[1]))];
+
+  // Also extract the display names for these plays (the anchor text)
+  const playNameRegex = new RegExp(`href="[^"]*/${formationFullSlug}/[a-z0-9\\-]+/?"[^>]*>([^<]+)<`, 'gi');
   const playNames = [...html.matchAll(playNameRegex)].map(m => m[1].trim());
+
+  // Build media.cfb.fan URLs for each play
+  const imageUrls = playSlugs.map(slug =>
+    `https://media.cfb.fan/27/playbookdb/${sideLabel}/${formationType}/${formationBody}/${slug}.jpg`
+  );
 
   return {
     playbookUrl,
     formationUrl,
-    imageUrls: playImages.slice(0, 8), // return up to 8, caller picks 4
+    formationType,
+    formationBody,
+    sideLabel,
+    imageUrls: imageUrls.slice(0, 8),
     playNames: playNames.slice(0, 8),
-    totalImagesFound: playImages.length,
+    totalImagesFound: imageUrls.length,
   };
 }
 
