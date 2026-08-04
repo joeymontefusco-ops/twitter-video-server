@@ -1828,10 +1828,47 @@ app.post('/post-thread', async (req, res) => {
 
     const allSectionMedia = Object.values(sectionMediaMap);
 
+    // ── CFB.fan hook images: parse hook for "— PLAYBOOK, FORMATION" and scrape
+    let cfbHookMedia = [];
+    try {
+      const hookFirstLine = (thread.hook || '').split('\n')[0];
+      const dashSplit = hookFirstLine.split(/\s+—\s+|\s+-\s+/); // em-dash or hyphen with spaces
+      if (dashSplit.length >= 2) {
+        const afterDash = dashSplit[dashSplit.length - 1];
+        const parts = afterDash.split(',').map(s => s.trim()).filter(Boolean);
+        if (parts.length >= 2) {
+          const playbookName = parts[0];
+          const formationName = parts[1];
+          console.log(`[post-thread] Attempting cfb.fan scrape: playbook="${playbookName}", formation="${formationName}"`);
+          const scrapeResult = await scrapeCfbFan(playbookName, formationName);
+          const cfbUrls = (scrapeResult.imageUrls || []).slice(0, 4);
+          for (let i = 0; i < cfbUrls.length; i++) {
+            try {
+              const tmpImg = path.join('/tmp', `cfb_hook_${Date.now()}_${i}.jpg`);
+              const dl = await axios.get(cfbUrls[i], { responseType: 'arraybuffer', timeout: 30000 });
+              fs.writeFileSync(tmpImg, dl.data);
+              const media = await uploadImageVerified(tmpImg, token);
+              try { fs.unlinkSync(tmpImg); } catch (e) {}
+              if (media) cfbHookMedia.push(media);
+            } catch (e) {
+              console.error(`[post-thread] CFB image ${i + 1} upload failed:`, e.message);
+            }
+          }
+          console.log(`[post-thread] CFB.fan hook images uploaded: ${cfbHookMedia.length}/${cfbUrls.length}`);
+        } else {
+          console.log(`[post-thread] Hook first line doesn't have PLAYBOOK, FORMATION format — skipping cfb.fan`);
+        }
+      } else {
+        console.log(`[post-thread] Hook first line doesn't have em-dash separator — skipping cfb.fan`);
+      }
+    } catch (cfbErr) {
+      console.error('[post-thread] cfb.fan scrape/upload failed (non-fatal):', cfbErr.message);
+    }
+
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
       const media = index === 0
-  ? allSectionMedia.slice(0, 4) // hook gets max 4 images
+        ? (cfbHookMedia.length > 0 ? cfbHookMedia : allSectionMedia.slice(0, 4))
         : section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
       return {
         status: text,
