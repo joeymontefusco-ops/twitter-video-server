@@ -2551,7 +2551,7 @@ app.post('/test-cfb-scrape', async (req, res) => {
     res.json({ success: true, ...result });
   } catch (err) {
     console.error('[cfb-scrape] Error:', err.message);
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({ success: false, error: err.message, debug: err.debug || null });
   }
 });
 
@@ -2572,25 +2572,39 @@ async function scrapeCfbFan(playbookName, formationName) {
   const suffixes = ['off', 'def'];
   let formationUrl = null;
   let playbookUrl = null;
+  const debugInfo = { playbookAttempts: [] };
   for (const suffix of suffixes) {
     const url = `https://cfb.fan/playbooks/${playbookSlug}-${suffix}/`;
     try {
       const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-      // Find any link whose slug ends with the formation slug (may have prefix like gun-)
-      const re = new RegExp(`href="(https?://cfb\\.fan/(?:\\d+/)?playbooks/${playbookSlug}-${suffix}/[a-z0-9\\-]*${formationSlug}/?)"`, 'gi');
+      // Look for formation slug in path portion (absolute or relative URLs)
+      const re = new RegExp(`(?:https?://cfb\\.fan)?/(?:\\d+/)?playbooks/${playbookSlug}-${suffix}/([a-z0-9\\-]*${formationSlug})/?`, 'gi');
       const matches = [...r.data.matchAll(re)];
+      debugInfo.playbookAttempts.push({
+        url,
+        status: r.status,
+        htmlLength: (r.data || '').length,
+        matchCount: matches.length,
+        firstMatch: matches[0] ? matches[0][0] : null,
+      });
       if (matches.length > 0) {
-        formationUrl = matches[0][1];
+        const slug = matches[0][1];
+        formationUrl = `https://cfb.fan/playbooks/${playbookSlug}-${suffix}/${slug}/`;
         playbookUrl = url;
         console.log(`[cfb-scrape] Found formation URL: ${formationUrl}`);
         break;
       }
     } catch (e) {
+      debugInfo.playbookAttempts.push({ url, error: e.message });
       console.log(`[cfb-scrape] Playbook page ${url} failed: ${e.message}`);
     }
   }
 
-  if (!formationUrl) throw new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
+  if (!formationUrl) {
+    const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
+    err.debug = debugInfo;
+    throw err;
+  }
 
   // Fetch the formation page and extract play images
   const formResp = await axios.get(formationUrl, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
