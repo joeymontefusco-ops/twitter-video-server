@@ -737,108 +737,149 @@ async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
 
 
 
-// ─── Build a branded "THE SETUP" FB section card (Puppeteer HTML → PNG) ───
-async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex, totalSections, thread) {
+// ── per-thread pickers ──
+function pickIndex(seed, n) {
+  seed = String(seed || '');
+  let h = 0;
+  for (let i = 0; i < seed.length; i++) h = (h * 31 + seed.charCodeAt(i)) >>> 0;
+  return h % n;
+}
+const THEMES = [
+  { name: 'midnight', overlay: 'rgba(6,20,48,0.55)',  accent: '#2e7bd6', panel: 'rgba(10,30,64,0.78)' },
+  { name: 'teal',     overlay: 'rgba(4,38,44,0.55)',  accent: '#1fb6a6', panel: 'rgba(8,44,48,0.80)' },
+  { name: 'violet',   overlay: 'rgba(28,10,52,0.58)', accent: '#8a6bff', panel: 'rgba(30,16,60,0.80)' },
+  { name: 'crimson',  overlay: 'rgba(40,8,16,0.55)',  accent: '#ff5566', panel: 'rgba(48,12,20,0.80)' },
+  { name: 'gold',     overlay: 'rgba(30,22,4,0.55)',  accent: '#f2b705', panel: 'rgba(38,28,6,0.80)' },
+];
+const LAYOUT_KEYS = ['A', 'B', 'C', 'D'];
+function pickTheme(seed)  { return THEMES[pickIndex('t' + seed, THEMES.length)]; }   // theme + layout use
+function pickLayout(seed) { return LAYOUT_KEYS[pickIndex('l' + seed, LAYOUT_KEYS.length)]; } // different seeds → independent
+
+const BASE_CSS = `
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{width:1080px;height:1350px;font-family:'DejaVu Sans',Arial,sans-serif;color:#fff;position:relative;overflow:hidden}
+  .bg{position:absolute;inset:0}
+  .bg::after{content:'';position:absolute;inset:0;background:var(--overlay)}
+  .wrap{position:relative;padding:40px 44px;height:100%;display:flex;flex-direction:column}
+  .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
+  .brand{display:flex;align-items:center;gap:14px}
+  .brand img{width:74px;height:74px}
+  .brand span{font-weight:700;font-size:30px;line-height:1.05}
+  .pill{background:#fff;border-radius:12px;padding:12px 22px;font-weight:800;font-size:30px}
+  .pill .m{color:var(--accent)}.pill .o{color:#0a0a0a}
+  h1{font-weight:800;font-size:40px;line-height:1.15;text-align:center;text-transform:uppercase;margin-bottom:22px}
+  .panel{background:var(--panel);border-radius:22px;padding:26px 28px}
+  .panel h2{font-size:30px;font-weight:800;margin-bottom:14px}
+  .kv{font-size:26px;line-height:1.5}.kv b{font-weight:800}
+  ul{list-style:none;display:flex;flex-direction:column;gap:16px}
+  li{position:relative;padding-left:26px;font-size:25px;line-height:1.35}
+  li::before{content:'•';position:absolute;left:4px;top:-1px;color:var(--accent)}
+  .boxes{display:flex;gap:16px}
+  .label{background:#0a0a0a;border-radius:10px;padding:16px 22px;font-size:32px;font-weight:800;text-align:center;flex:1;display:flex;align-items:center;justify-content:center}
+  .art{border-radius:14px;overflow:hidden}.art img{width:100%;height:100%;object-fit:cover;display:block}
+  .foot{display:flex;justify-content:space-between;align-items:flex-end;margin-top:auto;padding-top:20px}
+  .url{font-size:44px;font-weight:800;text-decoration:underline;text-decoration-color:var(--accent)}
+  .qr{width:120px;height:120px;background:#fff;padding:6px;border-radius:6px}.qr img{width:100%;height:100%}
+`;
+
+// Same fragments (F), arranged differently + a little container CSS each.
+const LAYOUTS = {
+  A: (F) => ({ // split: text left, art right
+    style: `.cols{display:flex;gap:26px;flex:1;min-height:0}
+            .col{flex:1;display:flex;flex-direction:column;gap:22px;min-height:0}
+            .rt .boxes{flex-direction:column}.rt .art{flex:1}`,
+    body: `${F.headline}<div class="cols">
+             <div class="col">${F.setup}${F.bullets}</div>
+             <div class="col rt">${F.boxes}${F.art}</div></div>`,
+  }),
+  C: (F) => ({ // mirror: art left, text right
+    style: `.cols{display:flex;gap:26px;flex:1;min-height:0}
+            .col{flex:1;display:flex;flex-direction:column;gap:22px;min-height:0}
+            .lt .boxes{flex-direction:column}.lt .art{flex:1}`,
+    body: `${F.headline}<div class="cols">
+             <div class="col lt">${F.boxes}${F.art}</div>
+             <div class="col">${F.setup}${F.bullets}</div></div>`,
+  }),
+  B: (F) => ({ // hero-top: image forward
+    style: `.stack{display:flex;flex-direction:column;gap:20px;flex:1;min-height:0}
+            .stack>.art{flex:1;min-height:0}
+            .row{display:flex;gap:22px}.row>*{flex:1}`,
+    body: `${F.headline}<div class="stack">
+             ${F.boxes}${F.art}
+             <div class="row">${F.setup}${F.bullets}</div></div>`,
+  }),
+  D: (F) => ({ // stacked: text on top, art strip at bottom
+    style: `.stack{display:flex;flex-direction:column;gap:20px;flex:1;min-height:0}
+            .stack>.art{height:360px;flex:none}`,
+    body: `${F.headline}<div class="stack">
+             ${F.setup}${F.boxes}${F.bullets}${F.art}</div>`,
+  }),
+};
+
+async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex, totalSections, thread, opts = {}) {
+  const seed   = (thread && thread.hook) || '';
+  const theme  = opts.theme  || pickTheme(seed);
+  const layout = opts.layout || pickLayout(seed);
+
   const b64 = p => fs.readFileSync(p).toString('base64');
-  const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
+  const brainBg = b64(path.join(__dirname, theme.bg || 'brain-bg.png'));
   const logo    = b64(path.join(__dirname, 'tma-logo.png'));
   const qr      = b64(path.join(__dirname, 'qr.png'));
-  const playart = b64(rawFramePath);
-
+  const art     = b64(rawFramePath);
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  // Headline = hook line 1; formation labels = "— A, B" tokens after the em-dash
-  const headline = ((thread && thread.hook) || '').split('\n').map(s => s.trim()).find(Boolean) || '';
-  let formations = [];
-  const dash = headline.split(/\s+—\s+|\s+-\s+/);
-  if (dash.length >= 2) {
-    formations = dash[dash.length - 1].split(',').map(s => s.trim()).filter(Boolean).slice(0, 2);
+  const rawHook = seed.split('\n').map(s => s.trim()).find(Boolean) || '';
+  const segs = rawHook.split(/\s+—\s+|\s+-\s+/);
+  let headline = rawHook, formations = [];
+  if (segs.length >= 2) {
+    const tail = segs[segs.length - 1].split(',').map(s => s.trim()).filter(Boolean);
+    if (tail.length >= 2) { formations = tail.slice(0, 2); headline = segs.slice(0, -1).join(' — ').trim(); }
   }
-
-  // Section title + bullets from content
-  const lines = (sectionData.content || '')
-    .split('\n').map(l => l.trim().replace(/^♟️\s*/, '').trim()).filter(Boolean);
+  const lines = (sectionData.content || '').split('\n').map(l => l.trim().replace(/^♟️\s*/, '').trim()).filter(Boolean);
   const sectionTitle = lines[0] || `Section ${sectionIndex + 1}`;
   const bullets = lines.slice(1);
-
-  const pick = label => {
-    const re = new RegExp('^' + label + '\\s*[:\\-]\\s*(.+)$', 'i');
-    for (const b of bullets) { const m = b.match(re); if (m) return m[1].trim(); }
-    return null;
-  };
-  const playbookVal = pick('playbook');
-  const playVal     = pick('play');
+  const pick = label => { const re = new RegExp('^' + label + '\\s*[:\\-]\\s*(.+)$', 'i'); for (const b of bullets) { const m = b.match(re); if (m) return m[1].trim(); } return null; };
+  const playbookVal = pick('playbook'), playVal = pick('play');
   const noteBullets = bullets.filter(b => !/^(playbook|play)\s*[:\-]/i.test(b));
-  const hasFormations = sectionIndex === 0 && formations.length > 0; // fallback: none → screenshot fills the column
+  const hasFormations = sectionIndex === 0 && formations.length > 0;
 
+  const F = {
+    headline: `<h1>${esc(headline)}</h1>`,
+    setup: `<div class="panel"><h2>${sectionIndex + 1}.) ${esc(sectionTitle)}</h2>`
+         + (playbookVal ? `<div class="kv"><b>Playbook:</b> ${esc(playbookVal)}</div>` : '')
+         + (playVal ? `<div class="kv"><b>PLAY:</b> ${esc(playVal)}</div>` : '') + `</div>`,
+    bullets: noteBullets.length ? `<div class="panel"><ul>${noteBullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul></div>` : '',
+    boxes: hasFormations ? `<div class="boxes">${formations.map(f => `<div class="label">${esc(f)}</div>`).join('')}</div>` : '',
+    art: `<div class="art"><img src="data:image/png;base64,${art}"></div>`,
+  };
+
+  const view = (LAYOUTS[layout] || LAYOUTS.A)(F);
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
-    *{margin:0;padding:0;box-sizing:border-box}
-    body{width:1080px;height:1350px;font-family:'DejaVu Sans',Arial,sans-serif;color:#fff;position:relative;overflow:hidden}
-    .bg{position:absolute;inset:0;background:url('data:image/png;base64,${brainBg}') center/cover no-repeat}
-    .bg::after{content:'';position:absolute;inset:0;background:rgba(6,20,48,.55)}
-    .wrap{position:relative;padding:40px 44px;height:100%;display:flex;flex-direction:column}
-    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
-    .brand{display:flex;align-items:center;gap:14px}
-    .brand img{width:74px;height:74px}
-    .brand span{font-weight:700;font-size:30px;line-height:1.05}
-    .pill{background:#fff;border-radius:12px;padding:12px 22px;font-weight:800;font-size:30px}
-    .pill .m{color:#2e7bd6}.pill .o{color:#0a0a0a}
-    h1{font-weight:800;font-size:40px;line-height:1.15;text-align:center;text-transform:uppercase;margin-bottom:26px}
-    .cols{display:flex;gap:26px;flex:1}
-    .col{flex:1;display:flex;flex-direction:column;gap:22px}
-    .panel{background:rgba(10,30,64,.78);border-radius:22px;padding:26px 28px}
-    .panel h2{font-size:30px;font-weight:800;margin-bottom:14px}
-    .kv{font-size:26px;line-height:1.5}.kv b{font-weight:800}
-    ul{list-style:none;display:flex;flex-direction:column;gap:16px}
-    li{position:relative;padding-left:26px;font-size:25px;line-height:1.35}
-    li::before{content:'•';position:absolute;left:4px;top:-1px}
-    .label{background:#0a0a0a;border-radius:10px;padding:16px 22px;font-size:34px;font-weight:800;text-align:center}
-    .art{border-radius:14px;overflow:hidden}.art img{width:100%;display:block}
-    .foot{display:flex;justify-content:space-between;align-items:flex-end;margin-top:22px}
-    .url{font-size:44px;font-weight:800;text-decoration:underline}
-    .qr{width:120px;height:120px;background:#fff;padding:6px;border-radius:6px}.qr img{width:100%;height:100%}
+    :root{--overlay:${theme.overlay};--accent:${theme.accent};--panel:${theme.panel}}
+    ${BASE_CSS}
+    ${view.style}
   </style></head><body>
-    <div class="bg"></div>
+    <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
       <div class="top">
         <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
         <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
       </div>
-      <h1>${esc(headline)}</h1>
-      <div class="cols">
-        <div class="col">
-          <div class="panel">
-            <h2>${sectionIndex + 1}.) ${esc(sectionTitle)}</h2>
-            ${playbookVal ? `<div class="kv"><b>Playbook:</b> ${esc(playbookVal)}</div>` : ''}
-            ${playVal ? `<div class="kv"><b>PLAY:</b> ${esc(playVal)}</div>` : ''}
-          </div>
-          ${noteBullets.length ? `<div class="panel"><ul>${noteBullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul></div>` : ''}
-        </div>
-        <div class="col">
-          ${hasFormations ? formations.map(f => `<div class="label">${esc(f)}</div>`).join('') : ''}
-          <div class="art"><img src="data:image/png;base64,${playart}"></div>
-        </div>
-      </div>
-      <div class="foot">
-        <div class="url">THEMADDENACADEMY.COM</div>
-        <div class="qr"><img src="data:image/png;base64,${qr}"></div>
-      </div>
+      ${view.body}
+      <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
     </div>
   </body></html>`;
 
   const browser = await puppeteer.launch({
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
-    headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
   try {
     const page = await browser.newPage();
     await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
     await page.setContent(html, { waitUntil: 'networkidle0' });
     return await page.screenshot({ type: 'png' });
-  } finally {
-    await browser.close();
-  }
+  } finally { await browser.close(); }
 }
 
 // Card 1 play-art = the cfb.fan play image for the hook's playbook+formation.
@@ -2852,8 +2893,13 @@ async function handleTestFbCard(req, res) {
       const label = section === 0 ? 'PLAYBOOK IMAGE (placeholder)' : 'GAMEPLAY SCREENSHOT (placeholder)';
       fs.writeFileSync(playArt, await makePlaceholderPng(label)); tmp = playArt;
     }
-    const buf = await buildFacebookSectionImage(playArt, sections[section], section, sections.length, thread);
+    const opts = {};
+    if (p.theme != null && p.theme !== '') opts.theme = THEMES[parseInt(p.theme, 10) % THEMES.length];
+    if (p.layout) opts.layout = String(p.layout).toUpperCase();
+    const buf = await buildFacebookSectionImage(playArt, sections[section], section, sections.length, thread, opts);
     res.set('Content-Type', 'image/png');
+    res.set('X-Theme', (opts.theme || pickTheme(thread.hook || '')).name);
+    res.set('X-Layout', opts.layout || pickLayout(thread.hook || ''));
     res.send(buf);
   } catch (err) {
     console.error('[test-fb-card] Error:', err.message);
