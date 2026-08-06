@@ -737,89 +737,144 @@ async function uploadImageVerified(imagePath, jwtToken, maxAttempts = 3) {
 
 
 
-// ─── Build a full styled FB section image with header/title/play-art/notes/footer
-async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex, totalSections) {
-  const sharp = require('sharp');
-  const W = 1200;
-  const headerH = 90;
-  const titleAreaH = 110;
-  const playartH = 675;   // 16:9 at 1200 wide
-  const footerH = 90;
-  const notesPadX = 45;
-  const notesPadY = 35;
-  const notesHeaderH = 55;
-  const noteFontSize = 30;
-  const noteLineHeight = Math.floor(noteFontSize * 1.5);
-  const darkBlue = '#0d2340';
-  const primaryBlue = '#1e6ec8';
-  const bgColor = { r: 255, g: 255, b: 255, alpha: 1 };
+// ─── Build a branded "THE SETUP" FB section card (Puppeteer HTML → PNG) ───
+async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex, totalSections, thread) {
+  const b64 = p => fs.readFileSync(p).toString('base64');
+  const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
+  const logo    = b64(path.join(__dirname, 'tma-logo.png'));
+  const qr      = b64(path.join(__dirname, 'qr.png'));
+  const playart = b64(rawFramePath);
 
-  // Parse section content: first non-empty line = title, rest = bullets
-  const contentLines = (sectionData.content || '')
-    .split('\n')
-    .map(l => l.trim().replace(/^♟️\s*/, '').trim())
-    .filter(l => l.length > 0);
-  const sectionTitle = contentLines[0] || `Section ${sectionIndex + 1}`;
-  const rawBullets = contentLines.slice(1);
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  // Wrap long bullet lines
-  const maxCharsPerLine = Math.floor((W - notesPadX * 2 - 20) / (noteFontSize * 0.53));
-  const bulletBlocks = rawBullets.map(b => wrapText(b, maxCharsPerLine, 2));
-  const totalBulletLines = bulletBlocks.reduce((sum, block) => sum + block.length, 0);
-  const notesH = notesPadY * 2 + notesHeaderH + totalBulletLines * noteLineHeight + 20;
-  const H = headerH + titleAreaH + playartH + notesH + footerH;
+  // Headline = hook line 1; formation labels = "— A, B" tokens after the em-dash
+  const headline = ((thread && thread.hook) || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+  let formations = [];
+  const dash = headline.split(/\s+—\s+|\s+-\s+/);
+  if (dash.length >= 2) {
+    formations = dash[dash.length - 1].split(',').map(s => s.trim()).filter(Boolean).slice(0, 2);
+  }
 
-  // Play-art: cover the full 1200 x 675 area
-  const playartBuf = await sharp(rawFramePath)
-    .resize(W, playartH, { fit: 'cover', position: 'center' })
-    .png()
-    .toBuffer();
+  // Section title + bullets from content
+  const lines = (sectionData.content || '')
+    .split('\n').map(l => l.trim().replace(/^♟️\s*/, '').trim()).filter(Boolean);
+  const sectionTitle = lines[0] || `Section ${sectionIndex + 1}`;
+  const bullets = lines.slice(1);
 
-  const maxTitleChars = 34;
-  const displayTitle = sectionTitle.length > maxTitleChars
-    ? sectionTitle.substring(0, maxTitleChars - 2).trim() + '…'
-    : sectionTitle;
+  const pick = label => {
+    const re = new RegExp('^' + label + '\\s*[:\\-]\\s*(.+)$', 'i');
+    for (const b of bullets) { const m = b.match(re); if (m) return m[1].trim(); }
+    return null;
+  };
+  const playbookVal = pick('playbook');
+  const playVal     = pick('play');
+  const noteBullets = bullets.filter(b => !/^(playbook|play)\s*[:\-]/i.test(b));
+  const hasFormations = sectionIndex === 0 && formations.length > 0; // fallback: none → screenshot fills the column
 
-  let bulletY = headerH + titleAreaH + playartH + notesPadY + notesHeaderH + 10;
-  const bulletTextNodes = [];
-  bulletBlocks.forEach((block) => {
-    block.forEach((line, lineIdx) => {
-      const prefix = lineIdx === 0 ? '•  ' : '    ';
-      bulletTextNodes.push(
-        `<text x="${notesPadX}" y="${bulletY}" font-family="DejaVu Sans, Arial, sans-serif" font-size="${noteFontSize}" font-weight="400" fill="#1a1a1a">${escapeXml(prefix + line)}</text>`
-      );
-      bulletY += noteLineHeight;
-    });
-    bulletY += 6;
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    *{margin:0;padding:0;box-sizing:border-box}
+    body{width:1080px;height:1350px;font-family:'DejaVu Sans',Arial,sans-serif;color:#fff;position:relative;overflow:hidden}
+    .bg{position:absolute;inset:0;background:url('data:image/png;base64,${brainBg}') center/cover no-repeat}
+    .bg::after{content:'';position:absolute;inset:0;background:rgba(6,20,48,.55)}
+    .wrap{position:relative;padding:40px 44px;height:100%;display:flex;flex-direction:column}
+    .top{display:flex;justify-content:space-between;align-items:center;margin-bottom:22px}
+    .brand{display:flex;align-items:center;gap:14px}
+    .brand img{width:74px;height:74px}
+    .brand span{font-weight:700;font-size:30px;line-height:1.05}
+    .pill{background:#fff;border-radius:12px;padding:12px 22px;font-weight:800;font-size:30px}
+    .pill .m{color:#2e7bd6}.pill .o{color:#0a0a0a}
+    h1{font-weight:800;font-size:40px;line-height:1.15;text-align:center;text-transform:uppercase;margin-bottom:26px}
+    .cols{display:flex;gap:26px;flex:1}
+    .col{flex:1;display:flex;flex-direction:column;gap:22px}
+    .panel{background:rgba(10,30,64,.78);border-radius:22px;padding:26px 28px}
+    .panel h2{font-size:30px;font-weight:800;margin-bottom:14px}
+    .kv{font-size:26px;line-height:1.5}.kv b{font-weight:800}
+    ul{list-style:none;display:flex;flex-direction:column;gap:16px}
+    li{position:relative;padding-left:26px;font-size:25px;line-height:1.35}
+    li::before{content:'•';position:absolute;left:4px;top:-1px}
+    .label{background:#0a0a0a;border-radius:10px;padding:16px 22px;font-size:34px;font-weight:800;text-align:center}
+    .art{border-radius:14px;overflow:hidden}.art img{width:100%;display:block}
+    .foot{display:flex;justify-content:space-between;align-items:flex-end;margin-top:22px}
+    .url{font-size:44px;font-weight:800;text-decoration:underline}
+    .qr{width:120px;height:120px;background:#fff;padding:6px;border-radius:6px}.qr img{width:100%;height:100%}
+  </style></head><body>
+    <div class="bg"></div>
+    <div class="wrap">
+      <div class="top">
+        <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
+        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+      </div>
+      <h1>${esc(headline)}</h1>
+      <div class="cols">
+        <div class="col">
+          <div class="panel">
+            <h2>${sectionIndex + 1}.) ${esc(sectionTitle)}</h2>
+            ${playbookVal ? `<div class="kv"><b>Playbook:</b> ${esc(playbookVal)}</div>` : ''}
+            ${playVal ? `<div class="kv"><b>PLAY:</b> ${esc(playVal)}</div>` : ''}
+          </div>
+          ${noteBullets.length ? `<div class="panel"><ul>${noteBullets.map(b => `<li>${esc(b)}</li>`).join('')}</ul></div>` : ''}
+        </div>
+        <div class="col">
+          ${hasFormations ? formations.map(f => `<div class="label">${esc(f)}</div>`).join('') : ''}
+          <div class="art"><img src="data:image/png;base64,${playart}"></div>
+        </div>
+      </div>
+      <div class="foot">
+        <div class="url">THEMADDENACADEMY.COM</div>
+        <div class="qr"><img src="data:image/png;base64,${qr}"></div>
+      </div>
+    </div>
+  </body></html>`;
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
-
-  const counterText = `${sectionIndex + 1} / ${totalSections}`;
-
-  const svgOverlays = `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">
-  <rect x="0" y="0" width="${W}" height="${headerH}" fill="${darkBlue}"/>
-  <text x="30" y="${Math.floor(headerH * 0.62)}" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" font-weight="700" fill="white">FULL VID BREAKDOWN</text>
-  <text x="${W - 30}" y="${Math.floor(headerH * 0.62)}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="22" font-weight="700" fill="white">themaddenacademy.com</text>
-  <rect x="45" y="${headerH + 18}" width="${W - 90}" height="${titleAreaH - 36}" rx="14" ry="14" fill="${primaryBlue}"/>
-  <rect x="${W - 145}" y="${headerH + 30}" width="80" height="${titleAreaH - 60}" rx="8" ry="8" fill="white" opacity="0.18"/>
-  <text x="${W - 105}" y="${headerH + Math.floor(titleAreaH / 2) + 10}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="24" font-weight="700" fill="white">${escapeXml(counterText)}</text>
-  <text x="${Math.floor((W - 90) / 2) + 30}" y="${headerH + Math.floor(titleAreaH / 2) + 10}" text-anchor="middle" font-family="DejaVu Sans, Arial, sans-serif" font-size="32" font-weight="700" fill="white">${escapeXml(displayTitle)}</text>
-  <text x="${notesPadX}" y="${headerH + titleAreaH + playartH + notesPadY + 40}" font-family="DejaVu Sans, Arial, sans-serif" font-size="34" font-weight="700" fill="${darkBlue}">Notes &amp; Summary:</text>
-  ${bulletTextNodes.join('\n  ')}
-  <rect x="0" y="${H - footerH}" width="${W}" height="${footerH}" fill="${darkBlue}"/>
-  <text x="30" y="${H - Math.floor(footerH * 0.38)}" font-family="DejaVu Sans, Arial, sans-serif" font-size="26" font-weight="700" fill="white">MORE MADDEN CONTENT</text>
-  <text x="${W - 30}" y="${H - Math.floor(footerH * 0.38)}" text-anchor="end" font-family="DejaVu Sans, Arial, sans-serif" font-size="20" font-weight="700"><tspan fill="#4a90d9">MENTAL</tspan><tspan fill="white"> over META Mastery</tspan></text>
-</svg>`;
-
-  return await sharp({
-    create: { width: W, height: H, channels: 4, background: bgColor }
-  })
-    .composite([
-      { input: playartBuf, top: headerH + titleAreaH, left: 0 },
-      { input: Buffer.from(svgOverlays), top: 0, left: 0 },
-    ])
-    .png()
-    .toBuffer();
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.screenshot({ type: 'png' });
+  } finally {
+    await browser.close();
+  }
 }
+
+// Card 1 play-art = the cfb.fan play image for the hook's playbook+formation.
+// Returns a local /tmp path, or null (→ caller falls back to the gameplay screenshot).
+async function getPlaybookPlayArt(thread) {
+  try {
+    const hookFirstLine = ((thread && thread.hook) || '').split('\n')[0];
+    const dashSplit = hookFirstLine.split(/\s+—\s+|\s+-\s+/);
+    if (dashSplit.length < 2) return null;
+    const parts = dashSplit[dashSplit.length - 1].split(',').map(s => s.trim()).filter(Boolean);
+    if (parts.length < 2) return null;
+    const [playbookName, formationName] = parts;
+    const scrape = await scrapeCfbFan(playbookName, formationName);
+    const firstUrl = (scrape.imageUrls || [])[0];
+    if (!firstUrl) return null;
+    const p = path.join('/tmp', `fb_cfb_playart_${Date.now()}.jpg`);
+    const dl = await axios.get(firstUrl, { responseType: 'arraybuffer', timeout: 30000 });
+    fs.writeFileSync(p, Buffer.from(dl.data));
+    return p;
+  } catch (e) {
+    console.error('[fb] cfb.fan play-art fetch failed (using screenshot fallback):', e.message);
+    return null;
+  }
+}
+
+async function makePlaceholderPng(label, w = 1080, h = 720) {
+  const sharp = require('sharp');
+  const svg = `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">
+    <rect width="${w}" height="${h}" fill="#1b2733"/>
+    <text x="50%" y="50%" text-anchor="middle" dominant-baseline="middle"
+      font-family="DejaVu Sans, Arial" font-size="42" font-weight="700" fill="#566675">${label}</text>
+  </svg>`;
+  return sharp(Buffer.from(svg)).png().toBuffer();
+}
+
+
 
 // ─── Build a 2x2 testimonial collage from up to 4 testimonial images ──────
 // Includes: 16 Spaces Playbook image overlaid in center + TMA watermark top-left
@@ -2036,23 +2091,26 @@ app.post('/post-thread', async (req, res) => {
     // Post to Facebook Page via Graph API (fire-and-forget, gated by FB_ENABLED)
     if (process.env.FB_ENABLED === 'true') {
       const fbCaptionedPaths = [];
-      const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
-      try {
-        // Build fully-styled FB section images (header, title, play-art, notes, footer)
-        const totalSections = (thread.sections || []).length;
-        for (let i = 0; i < totalSections; i++) {
-          const s = thread.sections[i];
-          const rawFrame = sectionRawFrames[s.number];
-          if (!rawFrame || !fs.existsSync(rawFrame)) continue;
-          const styledPath = path.join('/tmp', `fb_section_${Date.now()}_${s.number}.png`);
-          try {
-            const buf = await buildFacebookSectionImage(rawFrame, s, i, totalSections);
-            fs.writeFileSync(styledPath, buf);
-            fbCaptionedPaths.push(styledPath);
-          } catch (e) {
-            console.error(`[fb] Failed to build section ${s.number} image:`, e.message);
-          }
-        }
+const numberEmojis = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣','9️⃣', '🔟'];
+let cfbPlayArt = null; // card 1's cfb.fan image (cleaned up in finally)
+try {
+  const totalSections = (thread.sections || []).length;
+  cfbPlayArt = await getPlaybookPlayArt(thread); // null if no playbook/formation
+  for (let i = 0; i < totalSections; i++) {
+    const s = thread.sections[i];
+    // Card 1 → cfb.fan playbook image; cards 2-N → gameplay screenshot.
+    const screenshot = sectionRawFrames[s.number];
+    const playArt = (i === 0 && cfbPlayArt) ? cfbPlayArt : screenshot;
+    if (!playArt || !fs.existsSync(playArt)) continue;
+    const styledPath = path.join('/tmp', `fb_section_${Date.now()}_${s.number}.png`);
+    try {
+      const buf = await buildFacebookSectionImage(playArt, s, i, totalSections, thread);
+      fs.writeFileSync(styledPath, buf);
+      fbCaptionedPaths.push(styledPath);
+    } catch (e) {
+      console.error(`[fb] Failed to build section ${s.number} image:`, e.message);
+    }
+  }
 
         // Add testimonial collage as final image in the FB gallery
         if (testimonialLocalPaths && testimonialLocalPaths.length > 0) {
@@ -2076,6 +2134,7 @@ app.post('/post-thread', async (req, res) => {
       } finally {
         // Clean up FB-captioned PNGs, raw frames, testimonial local PNGs
         fbCaptionedPaths.forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
+        if (cfbPlayArt) { try { if (fs.existsSync(cfbPlayArt)) fs.unlinkSync(cfbPlayArt); } catch (e) {} }   // ← add this
         Object.values(sectionRawFrames).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
         (testimonialLocalPaths || []).forEach(f => { try { if (fs.existsSync(f)) fs.unlinkSync(f); } catch (e) {} });
       }
@@ -2743,6 +2802,68 @@ app.post('/test-facebook', async (req, res) => {
     tmpPaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
   }
 });
+
+// ─── /test-fb-card — render one branded FB card from sample/fake data ──
+// GET  /test-fb-card?section=0            → card 1 (sample thread, placeholder art)
+// GET  /test-fb-card?section=0&useCfb=1   → card 1 with a real cfb.fan play image
+// GET  /test-fb-card?section=1            → card 2 (screenshot column, no boxes)
+// POST /test-fb-card { thread, section, playArtUrl, useCfb }  → override any of these
+const SAMPLE_THREAD = {
+  hook: 'Best no-adjust run defense for West Virginia toss CFB 27 — 4-2-5 Man Pressure, 4-2-5 3 High',
+  sections: [
+    { number: 1, title: 'THE SETUP', content: [
+      'THE SETUP',
+      'Playbook: 4-2-5 man pressure, 4-2-5-3 high',
+      'PLAY: Hot Blitz 3',
+      '4-2-5-3 high shell locks run keys.',
+      'Hot Blitz 3 brings instant edge pressure.',
+      '16 Spaces: force the toss into our gap structure.',
+      'That setup is raw chess, not random aggression.',
+    ].join('\n') },
+    { number: 2, title: 'THE READ', content: [
+      'THE READ',
+      'Watch the pulling guard to diagnose toss vs. dive.',
+      'Trigger the edge crash the instant the back opens his hips.',
+      'Do not overrun — keep leverage on the sideline.',
+    ].join('\n') },
+  ],
+};
+
+async function handleTestFbCard(req, res) {
+  const p = { ...req.query, ...req.body };
+  const section = parseInt(p.section, 10) || 0;
+  const useCfb = p.useCfb === true || p.useCfb === '1' || p.useCfb === 'true';
+  const thread = p.thread || SAMPLE_THREAD;
+  const sections = thread.sections || [];
+  if (section < 0 || section >= sections.length) {
+    return res.status(400).json({ error: `section out of range (0..${sections.length - 1})` });
+  }
+  let tmp = null;
+  try {
+    let playArt = null;
+    if (section === 0 && useCfb) { playArt = await getPlaybookPlayArt(thread); tmp = playArt; }
+    if (!playArt && p.playArtUrl) {
+      playArt = path.join('/tmp', `fbtest_art_${Date.now()}.png`);
+      const dl = await axios.get(p.playArtUrl, { responseType: 'arraybuffer', timeout: 30000 });
+      fs.writeFileSync(playArt, Buffer.from(dl.data)); tmp = playArt;
+    }
+    if (!playArt) {
+      playArt = path.join('/tmp', `fbtest_art_${Date.now()}.png`);
+      const label = section === 0 ? 'PLAYBOOK IMAGE (placeholder)' : 'GAMEPLAY SCREENSHOT (placeholder)';
+      fs.writeFileSync(playArt, await makePlaceholderPng(label)); tmp = playArt;
+    }
+    const buf = await buildFacebookSectionImage(playArt, sections[section], section, sections.length, thread);
+    res.set('Content-Type', 'image/png');
+    res.send(buf);
+  } catch (err) {
+    console.error('[test-fb-card] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message });
+  } finally {
+    if (tmp) { try { if (fs.existsSync(tmp)) fs.unlinkSync(tmp); } catch (e) {} }
+  }
+}
+app.get('/test-fb-card', handleTestFbCard);
+app.post('/test-fb-card', handleTestFbCard);
 
 app.post('/test-caption', async (req, res) => {
   const { imageUrl, caption } = req.body;
