@@ -1468,6 +1468,358 @@ async function tryStartDrip(driveFileId) {
   if (row.clipsReady === 'true' && row.threadPublished === 'true' && row.dripStage !== 'done' && !activeDrips.has(driveFileId)) {
     startDripChain(driveFileId);
   }
+  // TMA chain runs in parallel — independent of Manu's chain, but same trigger conditions
+  if (row.clipsReady === 'true' && row.threadPublished === 'true' && row.tmaDripStage !== 'done' && !activeTmaDrips.has(driveFileId)) {
+    startTmaDripChain(driveFileId);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TMA-only drip chain (11 stages, 6 hours total, TMA account only)
+// ═══════════════════════════════════════════════════════════════════════════
+const TMA_DRIP_ORDER = [
+  'tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2',
+  'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4',
+  'tmaFullVideo', 'tmaSummary', 'tmaLikeGraphic', 'done',
+];
+const TMA_DRIP_DELAYS = {
+  tmaClip1:       30 * 60 * 1000,
+  tmaChapter1:    30 * 60 * 1000,
+  tmaClip2:       60 * 60 * 1000,
+  tmaChapter2:    30 * 60 * 1000,
+  tmaClip3:       30 * 60 * 1000,
+  tmaChapter3:    30 * 60 * 1000,
+  tmaCfbPics:     30 * 60 * 1000,
+  tmaChapter4:    30 * 60 * 1000,
+  tmaFullVideo:   30 * 60 * 1000,
+  tmaSummary:     30 * 60 * 1000,
+  tmaLikeGraphic: 30 * 60 * 1000,
+};
+const activeTmaDrips = new Map();
+const TMA_USER_ID_CONST = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
+
+function nextTmaStage(current) {
+  const idx = TMA_DRIP_ORDER.indexOf(current);
+  return idx >= 0 && idx < TMA_DRIP_ORDER.length - 1 ? TMA_DRIP_ORDER[idx + 1] : null;
+}
+
+// Download an image from Firebase Storage to a local /tmp path
+async function downloadFromHfStorage(fileName, jwtToken) {
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const encoded = encodeURIComponent(fileName);
+  const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
+  const p = path.join('/tmp', `tma_dl_${Date.now()}_${uuidv4().substring(0, 8)}.png`);
+  const r = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    headers: { Authorization: `Firebase ${jwtToken}` },
+  });
+  fs.writeFileSync(p, Buffer.from(r.data));
+  return p;
+}
+
+// Post a single graphic (local PNG) as a quote tweet from TMA
+async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText, userId) {
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const token = hypefuryToken;
+  const uploaded = await uploadImageVerified(localImagePath, token);
+  if (!uploaded) throw new Error('Failed to upload graphic to Aerielab');
+
+  const payload = {
+    currentUserId: userId,
+    post: {
+      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+      slotType: 'post',
+      time: new Date().toISOString(),
+      scheduled: false,
+      user: userId,
+      publishingError: null,
+      deleted: false,
+      tweets: [{
+        status: commentText,
+        count: 0,
+        media: [uploaded],
+        guid: uuidv4(),
+        published: false,
+        quoteTweetData,
+        isTrusted: true,
+      }],
+      categories: [],
+      shareOnInstagram: false,
+      linkedIn: null,
+      facebook: null,
+      threads: null,
+    },
+  };
+
+  const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Origin: 'https://app.aerielab.co',
+      Referer: 'https://app.aerielab.co/queue',
+      'User-Agent': 'Mozilla/5.0',
+    },
+  });
+  return resp.data;
+}
+
+// Build the summary graphic (recap of all sections + 16 Spaces playbook art)
+async function buildFacebookSummaryImage(thread, opts = {}) {
+  const b64 = p => fs.readFileSync(p).toString('base64');
+  const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
+  const logo    = b64(path.join(__dirname, 'tma-logo.png'));
+  const qr      = b64(path.join(__dirname, 'qr.png'));
+  const playbook = fs.existsSync(path.join(__dirname, '16-spaces-playbook.png'))
+    ? b64(path.join(__dirname, '16-spaces-playbook.png'))
+    : null;
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const rawHook = (thread.hook || '').split('\n').map(s => s.trim()).find(Boolean) || '';
+  const segs = rawHook.split(/\s+—\s+|\s+-\s+/);
+  const headline = segs.length >= 2 ? segs.slice(0, -1).join(' — ').trim() : rawHook;
+
+  const sectionSummaries = (thread.sections || []).map((s, i) => {
+    const firstLine = (s.content || '').split('\n').map(l => l.trim().replace(/^♟️\s*/, '').trim()).find(Boolean) || `Section ${i + 1}`;
+    return `<li><b>${i + 1}.</b> ${esc(firstLine)}</li>`;
+  }).join('');
+
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    ${BASE_CSS}
+    .recap{display:flex;gap:26px;flex:1;min-height:0}
+    .recap .col{flex:1;display:flex;flex-direction:column;gap:22px;min-height:0}
+    .recap ol{list-style:none;padding:0;margin:0}
+    .recap li{background:rgba(0,0,0,0.35);padding:16px 20px;margin-bottom:14px;border-radius:12px;font-size:26px;color:#fff;line-height:1.35}
+    .recap li b{color:#4bd0ff;margin-right:8px}
+    .recap-art{flex:1;background:rgba(0,0,0,0.35);border-radius:16px;display:flex;align-items:center;justify-content:center;padding:20px}
+    .recap-art img{max-width:100%;max-height:100%;object-fit:contain}
+    .recap-header{background:rgba(0,0,0,0.5);color:#fff;padding:14px 22px;border-radius:12px;font-size:28px;font-weight:800;text-align:center;margin-bottom:16px;letter-spacing:1px}
+  </style></head><body>
+    <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
+    <div class="wrap">
+      <div class="top">
+        <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
+        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+      </div>
+      <h1>${esc(headline)}</h1>
+      <div class="recap">
+        <div class="col">
+          <div class="recap-header">RECAP — 16 SPACES BREAKDOWN</div>
+          <ol>${sectionSummaries}</ol>
+        </div>
+        <div class="col">
+          <div class="recap-art">
+            ${playbook ? `<img src="data:image/png;base64,${playbook}">` : `<div style="color:#fff;font-size:24px">16 SPACES PLAYBOOK</div>`}
+          </div>
+        </div>
+      </div>
+      <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
+    </div>
+  </body></html>`;
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.screenshot({ type: 'png' });
+  } finally { await browser.close(); }
+}
+
+// Build the "Like this post" call-to-action graphic
+async function buildFacebookLikeGraphic(thread, opts = {}) {
+  const b64 = p => fs.readFileSync(p).toString('base64');
+  const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
+  const logo    = b64(path.join(__dirname, 'tma-logo.png'));
+  const qr      = b64(path.join(__dirname, 'qr.png'));
+  const playbook = fs.existsSync(path.join(__dirname, '16-spaces-playbook.png'))
+    ? b64(path.join(__dirname, '16-spaces-playbook.png'))
+    : null;
+
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    ${BASE_CSS}
+    .like-wrap{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:36px;flex:1;text-align:center;padding:20px}
+    .like-heart{font-size:120px;line-height:1}
+    .like-text{font-size:56px;font-weight:900;color:#fff;line-height:1.1;text-shadow:0 3px 12px rgba(0,0,0,0.6);max-width:900px}
+    .like-text .accent{color:#4bd0ff}
+    .like-playbook{max-width:500px;max-height:500px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,0.6)}
+    .like-sub{font-size:28px;color:#fff;background:rgba(0,0,0,0.5);padding:12px 24px;border-radius:12px}
+  </style></head><body>
+    <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
+    <div class="wrap">
+      <div class="top">
+        <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
+        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+      </div>
+      <div class="like-wrap">
+        <div class="like-heart">❤️</div>
+        <div class="like-text">Like this post to unlock<br><span class="accent">the 16 Spaces Playbook</span></div>
+        ${playbook ? `<img class="like-playbook" src="data:image/png;base64,${playbook}">` : ''}
+        <div class="like-sub">FREE — Link in bio</div>
+      </div>
+      <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
+    </div>
+  </body></html>`;
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.screenshot({ type: 'png' });
+  } finally { await browser.close(); }
+}
+
+async function executeTmaDripStep(driveFileId, stage) {
+  try {
+    const row = await findSheetRow('driveFileId', driveFileId);
+    if (!row) {
+      console.log(`[tma-drip] Row not found for ${driveFileId} — stopping`);
+      activeTmaDrips.delete(driveFileId);
+      return;
+    }
+    if (row.tmaDripStage === 'done') {
+      console.log(`[tma-drip] Cancelled for ${driveFileId} — stage is 'done'`);
+      activeTmaDrips.delete(driveFileId);
+      return;
+    }
+
+    const quoteTweetData = JSON.parse(row.quoteTweetDataJson || '{}');
+    const clipData = JSON.parse(row.clipUrls || '[]');
+    const rawSectionImages = JSON.parse(row.sectionRawImageUrls || '{}');
+    const title = (quoteTweetData.text || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
+    const uid = TMA_USER_ID_CONST;
+    const handle = '@MaddenAcademy_';
+    console.log(`[tma-drip] Executing stage "${stage}" for ${driveFileId}`);
+
+    // Parse thread structure from quoteTweetData if needed for graphics
+    const threadForRender = {
+      hook: quoteTweetData.text || '',
+      sections: (JSON.parse(row.threadDataJson || '{}').sections) || [],
+    };
+
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+
+    if (stage.startsWith('tmaClip') && stage !== 'tmaChapter') {
+      const clipIdx = parseInt(stage.replace('tmaClip', '')) - 1;
+      if (clipData[clipIdx]) {
+        const commentText = `${title} Part ${clipIdx + 1}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+        await postClipQuoteTweet(clipData[clipIdx].url, quoteTweetData, commentText, uid);
+      } else {
+        console.log(`[tma-drip] No clip at index ${clipIdx} — skipping ${stage}`);
+      }
+
+    } else if (stage.startsWith('tmaChapter')) {
+      const chapterIdx = parseInt(stage.replace('tmaChapter', '')) - 1;
+      const sections = threadForRender.sections;
+      if (!sections[chapterIdx]) {
+        console.log(`[tma-drip] No section ${chapterIdx + 1} — skipping ${stage} (if applies)`);
+      } else {
+        // Download raw section frame from Firebase
+        const rawFileName = rawSectionImages[chapterIdx + 1] || rawSectionImages[String(chapterIdx + 1)];
+        if (!rawFileName) throw new Error(`No raw section image URL for section ${chapterIdx + 1}`);
+        const localFrame = await downloadFromHfStorage(rawFileName, jwt);
+        try {
+          const cardBuf = await buildFacebookSectionImage(localFrame, sections[chapterIdx], chapterIdx, sections.length, threadForRender);
+          const tmpCard = path.join('/tmp', `tma_chapter_${Date.now()}_${chapterIdx + 1}.png`);
+          fs.writeFileSync(tmpCard, cardBuf);
+          const commentText = `${title} — Chapter ${chapterIdx + 1}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+          try {
+            await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+          } finally {
+            try { fs.unlinkSync(tmpCard); } catch (e) {}
+          }
+        } finally {
+          try { fs.unlinkSync(localFrame); } catch (e) {}
+        }
+      }
+
+    } else if (stage === 'tmaCfbPics') {
+      // Re-post the 4 cfb.fan hook images as a QT (same as promo QT with TMA account)
+      await postPromoQuoteTweet(row, quoteTweetData, title, uid);
+
+    } else if (stage === 'tmaFullVideo') {
+      const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
+      const commentText = `${title}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+      await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
+
+    } else if (stage === 'tmaSummary') {
+      const cardBuf = await buildFacebookSummaryImage(threadForRender);
+      const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
+      fs.writeFileSync(tmpCard, cardBuf);
+      const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+      try {
+        await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+      } finally {
+        try { fs.unlinkSync(tmpCard); } catch (e) {}
+      }
+
+    } else if (stage === 'tmaLikeGraphic') {
+      const cardBuf = await buildFacebookLikeGraphic(threadForRender);
+      const tmpCard = path.join('/tmp', `tma_like_${Date.now()}.png`);
+      fs.writeFileSync(tmpCard, cardBuf);
+      const commentText = `Like this post ❤️ to unlock the 16 Spaces Playbook — free.\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+      try {
+        await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+      } finally {
+        try { fs.unlinkSync(tmpCard); } catch (e) {}
+      }
+    }
+
+    const next = nextTmaStage(stage);
+    if (next && next !== 'done') {
+      const delay = TMA_DRIP_DELAYS[next];
+      const nextTime = new Date(Date.now() + delay).toISOString();
+      await updateSheetRow(row._rowIndex, {
+        tmaDripStage: stage,
+        tmaNextDripAt: nextTime,
+      });
+      console.log(`[tma-drip] Next stage "${next}" scheduled at ${nextTime}`);
+      scheduleTmaDripStep(driveFileId, next, delay);
+    } else {
+      await updateSheetRow(row._rowIndex, {
+        tmaDripStage: 'done',
+        tmaNextDripAt: '',
+      });
+      activeTmaDrips.delete(driveFileId);
+      console.log(`[tma-drip] Chain complete for ${driveFileId}`);
+    }
+  } catch (err) {
+    console.error(`[tma-drip] Error in stage "${stage}" for ${driveFileId}:`, err.message);
+    // Don't stop the chain — schedule the next step
+    try {
+      const next = nextTmaStage(stage);
+      if (next && next !== 'done') {
+        const delay = TMA_DRIP_DELAYS[next];
+        scheduleTmaDripStep(driveFileId, next, delay);
+      }
+    } catch (e) {
+      console.error(`[tma-drip] Failed to schedule next step:`, e.message);
+    }
+  }
+}
+
+function scheduleTmaDripStep(driveFileId, stage, delayMs) {
+  const timer = setTimeout(() => executeTmaDripStep(driveFileId, stage), delayMs);
+  activeTmaDrips.set(driveFileId, { stage, timer });
+  console.log(`[tma-drip] Scheduled "${stage}" for ${driveFileId} in ${Math.round(delayMs / 60000)} min`);
+}
+
+function startTmaDripChain(driveFileId) {
+  if (activeTmaDrips.has(driveFileId)) {
+    console.log(`[tma-drip] Already active for ${driveFileId} — skipping`);
+    return;
+  }
+  const delay = TMA_DRIP_DELAYS.tmaClip1;
+  console.log(`[tma-drip] Starting TMA drip chain for ${driveFileId}`);
+  scheduleTmaDripStep(driveFileId, 'tmaClip1', delay);
 }
 
 // ─── Helper: post promo quote tweet (title + 4 images) ───────────────────
@@ -1764,20 +2116,29 @@ async function resumeDrips() {
     const now = Date.now();
 
     for (const row of rows) {
-      if (!row.dripStage || row.dripStage === 'done' || row.dripStage === 'waiting') continue;
-      if (activeDrips.has(row.driveFileId)) continue;
+      // Manu chain
+      if (row.dripStage && row.dripStage !== 'done' && row.dripStage !== 'waiting' && !activeDrips.has(row.driveFileId)) {
+        const currentIdx = DRIP_ORDER.indexOf(row.dripStage);
+        const nextStageVal = currentIdx >= 0 ? DRIP_ORDER[currentIdx + 1] : null;
+        if (nextStageVal && nextStageVal !== 'done') {
+          const nextTime = row.nextDripAt ? Date.parse(row.nextDripAt) : 0;
+          const delay = Math.max(nextTime - now, 5000);
+          console.log(`[drip-recovery] Resuming ${row.driveFileId} at stage "${nextStageVal}" in ${Math.round(delay / 60000)} min`);
+          scheduleDripStep(row.driveFileId, nextStageVal, delay);
+        }
+      }
 
-      // Find the next stage to execute
-      const currentIdx = DRIP_ORDER.indexOf(row.dripStage);
-      const nextStageVal = currentIdx >= 0 ? DRIP_ORDER[currentIdx + 1] : null;
-      if (!nextStageVal || nextStageVal === 'done') continue;
-
-      // Calculate delay: if nextDripAt is in the past, execute soon; otherwise wait
-      const nextTime = row.nextDripAt ? Date.parse(row.nextDripAt) : 0;
-      const delay = Math.max(nextTime - now, 5000); // at least 5s to let server fully start
-
-      console.log(`[drip-recovery] Resuming ${row.driveFileId} at stage "${nextStageVal}" in ${Math.round(delay / 60000)} min`);
-      scheduleDripStep(row.driveFileId, nextStageVal, delay);
+      // TMA chain (independent recovery)
+      if (row.tmaDripStage && row.tmaDripStage !== 'done' && row.tmaDripStage !== 'waiting' && !activeTmaDrips.has(row.driveFileId)) {
+        const tmaIdx = TMA_DRIP_ORDER.indexOf(row.tmaDripStage);
+        const nextTmaVal = tmaIdx >= 0 ? TMA_DRIP_ORDER[tmaIdx + 1] : null;
+        if (nextTmaVal && nextTmaVal !== 'done') {
+          const nextTime = row.tmaNextDripAt ? Date.parse(row.tmaNextDripAt) : 0;
+          const delay = Math.max(nextTime - now, 5000);
+          console.log(`[tma-drip-recovery] Resuming ${row.driveFileId} at stage "${nextTmaVal}" in ${Math.round(delay / 60000)} min`);
+          scheduleTmaDripStep(row.driveFileId, nextTmaVal, delay);
+        }
+      }
     }
   } catch (err) {
     console.error('[drip-recovery] Error:', err.message);
@@ -1871,6 +2232,7 @@ app.post('/post-thread', async (req, res) => {
     let sectionMediaMap = {};
     const sectionRawFrames = {}; // section number → raw frame path (for FB caption regeneration)
     const sectionContent = {};   // section number → text content (for FB captions)
+    const sectionRawMediaMap = {}; // section number → Firebase filename (for TMA chapter drip stages)
 
     if (driveFileId && thread.sections && thread.sections.length > 0) {
       try {
@@ -1902,6 +2264,16 @@ app.post('/post-thread', async (req, res) => {
               if (mediaInfo) {
                 sectionMediaMap[section.number] = mediaInfo;
                 console.log(`[post-thread] Section ${section.number} branded image uploaded: ${mediaInfo.name}`);
+              }
+              // Also upload the RAW frame for TMA chapter drip stages (retrievable later)
+              try {
+                const rawMediaInfo = await uploadImageVerified(framePath, token);
+                if (rawMediaInfo) {
+                  sectionRawMediaMap[section.number] = rawMediaInfo.name;
+                  console.log(`[post-thread] Section ${section.number} raw frame uploaded for drip: ${rawMediaInfo.name}`);
+                }
+              } catch (rawErr) {
+                console.error(`[post-thread] Raw frame upload failed for section ${section.number} (non-fatal):`, rawErr.message);
               }
               // Delete branded PNG immediately after upload (Twitter uses Firebase URL, not local)
               try { if (fs.existsSync(brandedPath)) fs.unlinkSync(brandedPath); } catch (e) {}
@@ -2121,6 +2493,32 @@ app.post('/post-thread', async (req, res) => {
     }
 
     console.log('[post-thread] Thread posted successfully:', response.data);
+
+    // Save raw section image filenames + thread structure to sheet for TMA chapter drip stages
+    try {
+      if (!skipHypefury) {
+        const rowForSheet = await findSheetRow('driveFileId', driveFileId);
+        if (rowForSheet) {
+          const sheetUpdates = {};
+          if (Object.keys(sectionRawMediaMap).length > 0) {
+            sheetUpdates.sectionRawImageUrls = JSON.stringify(sectionRawMediaMap);
+          }
+          // Save minimal thread data (hook + sections) for chapter/summary/like renders
+          sheetUpdates.threadDataJson = JSON.stringify({
+            hook: thread.hook || '',
+            sections: (thread.sections || []).map(s => ({
+              number: s.number,
+              title: s.title,
+              content: s.content,
+            })),
+          });
+          await updateSheetRow(rowForSheet._rowIndex, sheetUpdates);
+          console.log(`[post-thread] Saved section URLs (${Object.keys(sectionRawMediaMap).length}) + thread data to sheet for TMA drip`);
+        }
+      }
+    } catch (sheetErr) {
+      console.error('[post-thread] Failed to save section URLs/thread data to sheet (non-fatal):', sheetErr.message);
+    }
 
     // Send response to caller immediately — don't block on Facebook
     res.json({
