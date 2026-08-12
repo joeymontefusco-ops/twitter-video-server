@@ -3133,6 +3133,16 @@ app.post('/test-madden-scrape', async (req, res) => {
 
 // ─── Scrape madden-school.com for play images (SPA — requires headless browser) ──
 async function scrapeMaddenSchool(playbookName, formationName) {
+  let stealthPuppeteer;
+  try {
+    const puppeteerExtra = require('puppeteer-extra');
+    const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+    puppeteerExtra.use(StealthPlugin());
+    stealthPuppeteer = puppeteerExtra;
+  } catch (e) {
+    throw new Error(`puppeteer-extra not installed. Add to package.json: "puppeteer-extra" and "puppeteer-extra-plugin-stealth" — then Railway auto-installs on next deploy. (${e.message})`);
+  }
+
   const slugify = (s) => String(s || '')
     .toLowerCase()
     .replace(/\s+/g, '-')
@@ -3142,85 +3152,70 @@ async function scrapeMaddenSchool(playbookName, formationName) {
   const formationSlug = slugify(formationName);
   console.log(`[madden-scrape] formation=${formationSlug}`);
 
-  const BROWSER_HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Sec-Ch-Ua': '"Chromium";v="120", "Not_A Brand";v="99"',
-    'Sec-Ch-Ua-Mobile': '?0',
-    'Sec-Ch-Ua-Platform': '"Windows"',
-    'Sec-Fetch-Dest': 'document',
-    'Sec-Fetch-Mode': 'navigate',
-    'Sec-Fetch-Site': 'none',
-    'Sec-Fetch-User': '?1',
-    'Upgrade-Insecure-Requests': '1',
-  };
-
-  // Convert formation slug to underscore-underscore form used in image URLs:
-  //   "singleback-bunch-x-nasty" → "singleback_bunch-x-nasty"
-  //   (first hyphen becomes underscore; rest keep hyphens)
   const firstDash = formationSlug.indexOf('-');
   const underscoreSlug = firstDash > 0
     ? formationSlug.substring(0, firstDash) + '_' + formationSlug.substring(firstDash + 1)
     : formationSlug;
 
   const debugInfo = { attempts: [] };
+  const seedPlays = ['hb-dive', 'spacing', 'verticals', 'hb-slam', 'cheat-hb-slash', 'inside-zone', 'inside-zone-split'];
 
-  // Strategy: fetch a "seed" play page (any play in this formation). The page lists all
-  // other plays in the formation in the "More from …" section. Extract those slugs.
-  // Common play slugs that exist in most offensive formations — try each until one hits.
-  const seedPlays = ['hb-dive', 'spacing', 'verticals', 'hb-slam', 'cheat-hb-slash', 'inside-zone'];
-  let html = null;
-  let sourceUrl = null;
-  for (const seed of seedPlays) {
-    const url = `https://www.madden-school.com/plays/${formationSlug}/${seed}/`;
-    try {
-      const r = await axios.get(url, { timeout: 20000, headers: BROWSER_HEADERS });
-      if (r.status === 200 && r.data && r.data.length > 5000) {
-        html = r.data;
-        sourceUrl = url;
-        debugInfo.attempts.push({ url, status: r.status, htmlLength: r.data.length, ok: true });
-        console.log(`[madden-scrape] Loaded seed play: ${url}`);
-        break;
+  const browser = await stealthPuppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--single-process', '--no-zygote'],
+  });
+
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1400, height: 900 });
+
+    let html = null;
+    let sourceUrl = null;
+    for (const seed of seedPlays) {
+      const url = `https://www.madden-school.com/plays/${formationSlug}/${seed}/`;
+      try {
+        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const status = resp ? resp.status() : 0;
+        await new Promise(r => setTimeout(r, 2500));
+        const currentHtml = await page.content();
+        debugInfo.attempts.push({ url, status, htmlLength: currentHtml.length });
+        if (status === 200 && currentHtml.length > 20000 && currentHtml.includes('playbook_images_madden-27')) {
+          html = currentHtml;
+          sourceUrl = url;
+          console.log(`[madden-scrape] Loaded seed play: ${url} (${currentHtml.length} bytes)`);
+          break;
+        }
+      } catch (e) {
+        debugInfo.attempts.push({ url, error: e.message });
       }
-      debugInfo.attempts.push({ url, status: r.status, htmlLength: (r.data || '').length, ok: false });
-    } catch (e) {
-      debugInfo.attempts.push({ url, error: e.message, statusCode: e.response?.status });
     }
+
+    if (!html) {
+      const err = new Error(`Could not load any seed play for formation "${formationName}" (slug=${formationSlug})`);
+      err.debug = debugInfo;
+      throw err;
+    }
+
+    const linkRegex = new RegExp(`/plays/${formationSlug}/([a-z0-9\\-]+)/?["']`, 'gi');
+    const playSlugs = [...new Set([...html.matchAll(linkRegex)].map(m => m[1]))];
+
+    const imageUrls = playSlugs.map(slug =>
+      `https://www.madden-school.com/wp-content/plugins/playbook/playbook_images_madden-27/${underscoreSlug}_${slug}.png`
+    );
+
+    console.log(`[madden-scrape] Found ${playSlugs.length} plays in formation ${formationSlug}`);
+
+    return {
+      formationSlug,
+      sourceUrl,
+      imageUrls: imageUrls.slice(0, 8),
+      playNames: playSlugs.slice(0, 8),
+      totalImagesFound: imageUrls.length,
+    };
+  } finally {
+    await browser.close();
   }
-
-  if (!html) {
-    const err = new Error(`Could not load any seed play for formation "${formationName}" (slug=${formationSlug})`);
-    err.debug = debugInfo;
-    throw err;
-  }
-
-  // Extract all play slugs from the page (both the seed play itself + "More from" list)
-  const linkRegex = new RegExp(`/plays/${formationSlug}/([a-z0-9\\-]+)/?["']`, 'gi');
-  const playSlugs = [...new Set([...html.matchAll(linkRegex)].map(m => m[1]))];
-
-  // Optionally derive display names from anchor text (rough heuristic)
-  const nameRegex = new RegExp(`/plays/${formationSlug}/([a-z0-9\\-]+)/[^>]*>[^<]*<[^>]*>([^<]+)<`, 'gi');
-  const nameMap = {};
-  for (const m of html.matchAll(nameRegex)) {
-    if (!nameMap[m[1]]) nameMap[m[1]] = m[2].trim().split(/\s{2,}/)[0].trim();
-  }
-
-  const imageUrls = playSlugs.map(slug =>
-    `https://www.madden-school.com/wp-content/plugins/playbook/playbook_images_madden-27/${underscoreSlug}_${slug}.png`
-  );
-  const playNames = playSlugs.map(slug => nameMap[slug] || slug);
-
-  console.log(`[madden-scrape] Found ${playSlugs.length} plays in formation ${formationSlug}`);
-
-  return {
-    formationSlug,
-    sourceUrl,
-    imageUrls: imageUrls.slice(0, 8),
-    playNames: playNames.slice(0, 8),
-    totalImagesFound: imageUrls.length,
-  };
 }
 
 // ─── /test-cfb-scrape — scrape cfb.fan play images from playbook + formation ──
