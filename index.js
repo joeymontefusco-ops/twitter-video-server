@@ -3117,11 +3117,17 @@ async function scrapeMaddenSchool(playbookName, formationName) {
     const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
     try {
       const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-      // Formation links look like: href="https://www.madden-school.com/playbooks/{pb}/{side}/{type}/{formation}/"
-      // We want the "{type}-{formation}" combined slug for the /formations/ URL
-      const re = new RegExp(`href="https?://www\\.madden-school\\.com/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/"`, 'gi');
+      // Match both absolute (https://www.madden-school.com/...) and relative (/playbooks/...) hrefs
+      // Trailing slash optional
+      const re = new RegExp(`href=["'](?:https?://www\\.madden-school\\.com)?/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?["']`, 'gi');
       const candidates = [...new Set([...r.data.matchAll(re)].map(m => `${m[1]}-${m[2]}`))];
-      debugInfo.playbookAttempts.push({ url, status: r.status, htmlLength: (r.data || '').length, candidateCount: candidates.length });
+      debugInfo.playbookAttempts.push({
+        url,
+        status: r.status,
+        htmlLength: (r.data || '').length,
+        candidateCount: candidates.length,
+        sampleCandidates: candidates.slice(0, 10),
+      });
       for (const candidate of candidates) {
         const normalized = candidate.replace(/-+/g, '-');
         if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
