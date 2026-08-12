@@ -3125,21 +3125,32 @@ async function scrapeMaddenSchool(playbookName, formationName) {
       try {
         const page = await browser.newPage();
         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
         const status = resp ? resp.status() : 0;
-        const html = await page.content();
+
+        // Extract formation links directly from DOM — more robust than regex on HTML
+        // Formation URLs look like: /playbooks/{playbook}/{side}/{type}/{formation}/
+        const domCandidates = await page.evaluate(({ pb, sd }) => {
+          const results = new Set();
+          const anchors = document.querySelectorAll('a[href]');
+          const pattern = new RegExp(`/playbooks/${pb}/${sd}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?$`);
+          for (const a of anchors) {
+            const href = a.getAttribute('href') || '';
+            const m = href.match(pattern);
+            if (m) results.add(`${m[1]}-${m[2]}`);
+          }
+          return [...results];
+        }, { pb: playbookSlug, sd: side });
+
         await page.close();
 
-        const re = new RegExp(`href=["'](?:https?://www\\.madden-school\\.com)?/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?["']`, 'gi');
-        const candidates = [...new Set([...html.matchAll(re)].map(m => `${m[1]}-${m[2]}`))];
         debugInfo.playbookAttempts.push({
           url,
           status,
-          htmlLength: html.length,
-          candidateCount: candidates.length,
-          sampleCandidates: candidates.slice(0, 10),
+          candidateCount: domCandidates.length,
+          sampleCandidates: domCandidates.slice(0, 15),
         });
-        for (const candidate of candidates) {
+        for (const candidate of domCandidates) {
           const normalized = candidate.replace(/-+/g, '-');
           if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
             foundFormationFullSlug = candidate;
