@@ -3075,6 +3075,47 @@ async function captionImage(inputPath, captionText = null) {
 
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
 // ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
+// ─── /test-madden-image — try fetching a play image directly (bypass HTML scraping) ──
+app.post('/test-madden-image', async (req, res) => {
+  const { formation, play } = req.body;
+  if (!formation || !play) {
+    return res.status(400).json({ error: 'Missing formation or play (both required)' });
+  }
+  const slugify = (s) => String(s || '').toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9\-]/g, '').replace(/-+/g, '-').replace(/^-|-$/g, '');
+  const formationSlug = slugify(formation);
+  const playSlug = slugify(play);
+  const firstDash = formationSlug.indexOf('-');
+  const underscoreSlug = firstDash > 0
+    ? formationSlug.substring(0, firstDash) + '_' + formationSlug.substring(firstDash + 1)
+    : formationSlug;
+  const url = `https://www.madden-school.com/wp-content/plugins/playbook/playbook_images_madden-27/${underscoreSlug}_${playSlug}.png`;
+  try {
+    const r = await axios.get(url, {
+      responseType: 'arraybuffer',
+      timeout: 15000,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+        'Referer': 'https://www.madden-school.com/',
+      },
+    });
+    res.json({
+      success: true,
+      url,
+      status: r.status,
+      bytes: r.data.length,
+      contentType: r.headers['content-type'],
+    });
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      url,
+      error: err.message,
+      status: err.response?.status,
+    });
+  }
+});
+
 // ─── /test-madden-scrape — scrape madden-school.com play images ──────────
 app.post('/test-madden-scrape', async (req, res) => {
   const { playbook, formation } = req.body;
