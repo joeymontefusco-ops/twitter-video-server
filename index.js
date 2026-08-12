@@ -3206,12 +3206,38 @@ async function scrapeMaddenSchool(playbookName, formationName) {
 
     console.log(`[madden-scrape] Found ${playSlugs.length} plays in formation ${formationSlug}`);
 
+    // Download top N images inside the browser session (Cloudflare cookies attached)
+    const topN = 4;
+    const imagesToDownload = imageUrls.slice(0, topN);
+    const imageBuffers = [];
+    for (let i = 0; i < imagesToDownload.length; i++) {
+      const imgUrl = imagesToDownload[i];
+      try {
+        const b64 = await page.evaluate(async (url) => {
+          const r = await fetch(url, { credentials: 'include' });
+          if (!r.ok) throw new Error(`status ${r.status}`);
+          const blob = await r.blob();
+          return await new Promise((res, rej) => {
+            const reader = new FileReader();
+            reader.onloadend = () => res(reader.result.split(',')[1]);
+            reader.onerror = rej;
+            reader.readAsDataURL(blob);
+          });
+        }, imgUrl);
+        imageBuffers.push({ url: imgUrl, base64: b64, playSlug: playSlugs[i] });
+        console.log(`[madden-scrape] Downloaded image ${i + 1}/${imagesToDownload.length}: ${playSlugs[i]}`);
+      } catch (e) {
+        console.error(`[madden-scrape] Failed to download image ${i + 1}: ${e.message}`);
+      }
+    }
+
     return {
       formationSlug,
       sourceUrl,
       imageUrls: imageUrls.slice(0, 8),
       playNames: playSlugs.slice(0, 8),
       totalImagesFound: imageUrls.length,
+      downloadedImages: imageBuffers, // [{ url, base64, playSlug }]
     };
   } finally {
     await browser.close();
