@@ -3102,82 +3102,92 @@ async function scrapeMaddenSchool(playbookName, formationName) {
   const formationSlug = slugify(formationName);
   console.log(`[madden-scrape] Looking for playbook=${playbookSlug} formation=${formationSlug}`);
 
-  // URL format: madden-school.com/formations/{formation-slug}/{playbook}/
-  // Formation slug INCLUDES the type prefix (e.g. singleback-bunch-x-nasty, gun-doubles-flex-y-off-close)
-  // The playbook-page URL (server-rendered) uses /playbooks/{playbook}/{offense|defense}/
-  // Formation naming in Manu's hooks: usually just "DOUBLES FLEX Y OFF CLOSE" (no gun/singleback prefix)
-  // → we need to determine the prefix, so first hit the playbook index to find matching formation
+  const BROWSER_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Cache-Control': 'no-cache',
+    'Pragma': 'no-cache',
+    'Sec-Ch-Ua': '"Chromium";v="120", "Not_A Brand";v="99"',
+    'Sec-Ch-Ua-Mobile': '?0',
+    'Sec-Ch-Ua-Platform': '"Windows"',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+  };
 
-  // Try both offense and defense
   const sides = ['offense', 'defense'];
   let foundFormationFullSlug = null;
   let usedSide = null;
   const debugInfo = { playbookAttempts: [] };
+
+  for (const side of sides) {
+    const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
+    try {
+      const r = await axios.get(url, { timeout: 20000, headers: BROWSER_HEADERS });
+      const html = r.data;
+      // Parse formation links directly from HTML — try multiple patterns
+      const patterns = [
+        new RegExp(`href=["'](?:https?://www\\.madden-school\\.com)?/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?["']`, 'gi'),
+      ];
+      const candidates = new Set();
+      for (const re of patterns) {
+        for (const m of html.matchAll(re)) {
+          candidates.add(`${m[1]}-${m[2]}`);
+        }
+      }
+      const candArr = [...candidates];
+      debugInfo.playbookAttempts.push({
+        url,
+        status: r.status,
+        htmlLength: (html || '').length,
+        candidateCount: candArr.length,
+        sampleCandidates: candArr.slice(0, 15),
+      });
+      for (const candidate of candArr) {
+        const normalized = candidate.replace(/-+/g, '-');
+        if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
+          foundFormationFullSlug = candidate;
+          usedSide = side;
+          console.log(`[madden-scrape] Matched candidate="${candidate}"`);
+          break;
+        }
+      }
+      if (foundFormationFullSlug) break;
+    } catch (e) {
+      debugInfo.playbookAttempts.push({ url, error: e.message, statusCode: e.response?.status });
+      console.log(`[madden-scrape] Playbook page ${url} failed: ${e.message}`);
+    }
+  }
+
+  if (!foundFormationFullSlug) {
+    const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
+    err.debug = debugInfo;
+    throw err;
+  }
+
+  const formationUrl = `https://www.madden-school.com/formations/${foundFormationFullSlug}/${playbookSlug}/`;
+  console.log(`[madden-scrape] Rendering formation page: ${formationUrl}`);
+
+  // Formation page is a SPA — Puppeteer needed. Launch with minimal footprint.
   const browser = await puppeteer.launch({
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     headless: 'new',
-    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process',
+      '--no-zygote',
+    ],
   });
-
   try {
-    for (const side of sides) {
-      const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
-      try {
-        const page = await browser.newPage();
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
-        const status = resp ? resp.status() : 0;
-
-        // Extract formation links directly from DOM — more robust than regex on HTML
-        // Formation URLs look like: /playbooks/{playbook}/{side}/{type}/{formation}/
-        const domCandidates = await page.evaluate(({ pb, sd }) => {
-          const results = new Set();
-          const anchors = document.querySelectorAll('a[href]');
-          const pattern = new RegExp(`/playbooks/${pb}/${sd}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?$`);
-          for (const a of anchors) {
-            const href = a.getAttribute('href') || '';
-            const m = href.match(pattern);
-            if (m) results.add(`${m[1]}-${m[2]}`);
-          }
-          return [...results];
-        }, { pb: playbookSlug, sd: side });
-
-        await page.close();
-
-        debugInfo.playbookAttempts.push({
-          url,
-          status,
-          candidateCount: domCandidates.length,
-          sampleCandidates: domCandidates.slice(0, 15),
-        });
-        for (const candidate of domCandidates) {
-          const normalized = candidate.replace(/-+/g, '-');
-          if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
-            foundFormationFullSlug = candidate;
-            usedSide = side;
-            console.log(`[madden-scrape] Matched candidate="${candidate}"`);
-            break;
-          }
-        }
-        if (foundFormationFullSlug) break;
-      } catch (e) {
-        debugInfo.playbookAttempts.push({ url, error: e.message });
-        console.log(`[madden-scrape] Playbook page ${url} failed: ${e.message}`);
-      }
-    }
-
-    if (!foundFormationFullSlug) {
-      const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
-      err.debug = debugInfo;
-      throw err;
-    }
-
-    // Now render the formation SPA page to extract play data
-    const formationUrl = `https://www.madden-school.com/formations/${foundFormationFullSlug}/${playbookSlug}/`;
-    console.log(`[madden-scrape] Rendering formation page: ${formationUrl}`);
-
     const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+    await page.setUserAgent(BROWSER_HEADERS['User-Agent']);
     await page.setViewport({ width: 1400, height: 1000 });
     await page.goto(formationUrl, { waitUntil: 'networkidle0', timeout: 30000 });
     try {
