@@ -3075,6 +3075,144 @@ async function captionImage(inputPath, captionText = null) {
 
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
 // ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
+// ─── /test-madden-scrape — scrape madden-school.com play images ──────────
+app.post('/test-madden-scrape', async (req, res) => {
+  const { playbook, formation } = req.body;
+  if (!playbook || !formation) {
+    return res.status(400).json({ error: 'Missing playbook or formation' });
+  }
+  try {
+    const result = await scrapeMaddenSchool(playbook, formation);
+    res.json({ success: true, ...result });
+  } catch (err) {
+    console.error('[madden-scrape] Error:', err.message);
+    res.status(500).json({ success: false, error: err.message, debug: err.debug || null });
+  }
+});
+
+// ─── Scrape madden-school.com for play images (SPA — requires headless browser) ──
+async function scrapeMaddenSchool(playbookName, formationName) {
+  const slugify = (s) => String(s || '')
+    .toLowerCase()
+    .replace(/\s+/g, '-')
+    .replace(/[^a-z0-9\-]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+  const playbookSlug = slugify(playbookName);
+  const formationSlug = slugify(formationName);
+  console.log(`[madden-scrape] Looking for playbook=${playbookSlug} formation=${formationSlug}`);
+
+  // URL format: madden-school.com/formations/{formation-slug}/{playbook}/
+  // Formation slug INCLUDES the type prefix (e.g. singleback-bunch-x-nasty, gun-doubles-flex-y-off-close)
+  // The playbook-page URL (server-rendered) uses /playbooks/{playbook}/{offense|defense}/
+  // Formation naming in Manu's hooks: usually just "DOUBLES FLEX Y OFF CLOSE" (no gun/singleback prefix)
+  // → we need to determine the prefix, so first hit the playbook index to find matching formation
+
+  // Try both offense and defense
+  const sides = ['offense', 'defense'];
+  let foundFormationFullSlug = null;
+  let usedSide = null;
+  const debugInfo = { playbookAttempts: [] };
+  for (const side of sides) {
+    const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
+    try {
+      const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+      // Formation links look like: href="https://www.madden-school.com/playbooks/{pb}/{side}/{type}/{formation}/"
+      // We want the "{type}-{formation}" combined slug for the /formations/ URL
+      const re = new RegExp(`href="https?://www\\.madden-school\\.com/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/"`, 'gi');
+      const candidates = [...new Set([...r.data.matchAll(re)].map(m => `${m[1]}-${m[2]}`))];
+      debugInfo.playbookAttempts.push({ url, status: r.status, htmlLength: (r.data || '').length, candidateCount: candidates.length });
+      for (const candidate of candidates) {
+        const normalized = candidate.replace(/-+/g, '-');
+        if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
+          foundFormationFullSlug = candidate;
+          usedSide = side;
+          console.log(`[madden-scrape] Matched candidate="${candidate}"`);
+          break;
+        }
+      }
+      if (foundFormationFullSlug) break;
+    } catch (e) {
+      debugInfo.playbookAttempts.push({ url, error: e.message });
+      console.log(`[madden-scrape] Playbook page ${url} failed: ${e.message}`);
+    }
+  }
+
+  if (!foundFormationFullSlug) {
+    const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
+    err.debug = debugInfo;
+    throw err;
+  }
+
+  // Now render the formation SPA page with Puppeteer to extract play data
+  const formationUrl = `https://www.madden-school.com/formations/${foundFormationFullSlug}/${playbookSlug}/`;
+  console.log(`[madden-scrape] Rendering formation page: ${formationUrl}`);
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    headless: 'new',
+    args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (compatible; TMA-Automation/1.0)');
+    await page.setViewport({ width: 1400, height: 1000 });
+    await page.goto(formationUrl, { waitUntil: 'networkidle0', timeout: 30000 });
+    // Wait for plays to render — look for `.card img` or any signal from the SPA
+    try {
+      await page.waitForFunction(
+        () => document.querySelectorAll('img[src*="playbook_images"], img[src*="plays"]').length > 0,
+        { timeout: 15000 }
+      );
+    } catch (e) {
+      console.log(`[madden-scrape] Play images didn't render in time, extracting what's available`);
+    }
+
+    // Give it another moment for lazy-load
+    await new Promise(r => setTimeout(r, 1500));
+
+    // Extract all image URLs that look like play art
+    const playData = await page.evaluate(() => {
+      const results = [];
+      // Look at all images with "playbook" or "plays" in URL
+      const imgs = document.querySelectorAll('img');
+      for (const img of imgs) {
+        const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
+        if (!src) continue;
+        // Only images from madden-school's playbook_images_m26 CDN, and only PLAY art (not formations)
+        if (src.includes('playbook_images_m26') && !src.includes('formations/')) {
+          // Try to get the play name from a nearby element
+          let name = '';
+          const card = img.closest('a, .card, [class*="play"]');
+          if (card) {
+            const nameEl = card.querySelector('h3, h4, .name, [class*="name"]');
+            name = nameEl ? nameEl.textContent.trim() : (card.textContent || '').trim().substring(0, 50);
+          }
+          if (!results.find(r => r.url === src)) {
+            results.push({ url: src, name });
+          }
+        }
+      }
+      return results;
+    });
+
+    const imageUrls = playData.map(p => p.url);
+    const playNames = playData.map(p => p.name);
+    console.log(`[madden-scrape] Extracted ${imageUrls.length} play images`);
+
+    return {
+      formationUrl,
+      formationFullSlug: foundFormationFullSlug,
+      sideLabel: usedSide,
+      imageUrls: imageUrls.slice(0, 8),
+      playNames: playNames.slice(0, 8),
+      totalImagesFound: imageUrls.length,
+    };
+  } finally {
+    await browser.close();
+  }
+}
+
 // ─── /test-cfb-scrape — scrape cfb.fan play images from playbook + formation ──
 app.post('/test-cfb-scrape', async (req, res) => {
   const { playbook, formation } = req.body;
