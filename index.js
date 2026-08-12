@@ -2296,8 +2296,8 @@ app.post('/post-thread', async (req, res) => {
 
     const allSectionMedia = Object.values(sectionMediaMap);
 
-    // ── CFB.fan hook images: parse hook for "— PLAYBOOK, FORMATION" and scrape
-    let cfbHookMedia = [];
+    // ── Madden-school.com hook images: parse hook for "— PLAYBOOK, FORMATION" and scrape
+    let hookMedia = [];
     try {
       const hookFirstLine = (thread.hook || '').split('\n')[0];
       const dashSplit = hookFirstLine.split(/\s+—\s+|\s+-\s+/); // em-dash or hyphen with spaces
@@ -2307,36 +2307,35 @@ app.post('/post-thread', async (req, res) => {
         if (parts.length >= 2) {
           const playbookName = parts[0];
           const formationName = parts[1];
-          console.log(`[post-thread] Attempting cfb.fan scrape: playbook="${playbookName}", formation="${formationName}"`);
-          const scrapeResult = await scrapeCfbFan(playbookName, formationName);
-          const cfbUrls = (scrapeResult.imageUrls || []).slice(0, 4);
-          for (let i = 0; i < cfbUrls.length; i++) {
+          console.log(`[post-thread] Attempting madden-school scrape: playbook="${playbookName}", formation="${formationName}"`);
+          const scrapeResult = await scrapeMaddenSchool(playbookName, formationName);
+          const downloaded = scrapeResult.downloadedImages || [];
+          for (let i = 0; i < downloaded.length; i++) {
             try {
-              const tmpImg = path.join('/tmp', `cfb_hook_${Date.now()}_${i}.jpg`);
-              const dl = await axios.get(cfbUrls[i], { responseType: 'arraybuffer', timeout: 30000 });
-              fs.writeFileSync(tmpImg, dl.data);
+              const tmpImg = path.join('/tmp', `mad_hook_${Date.now()}_${i}.png`);
+              fs.writeFileSync(tmpImg, Buffer.from(downloaded[i].base64, 'base64'));
               const media = await uploadImageVerified(tmpImg, token);
               try { fs.unlinkSync(tmpImg); } catch (e) {}
-              if (media) cfbHookMedia.push(media);
+              if (media) hookMedia.push(media);
             } catch (e) {
-              console.error(`[post-thread] CFB image ${i + 1} upload failed:`, e.message);
+              console.error(`[post-thread] Madden-school image ${i + 1} upload failed:`, e.message);
             }
           }
-          console.log(`[post-thread] CFB.fan hook images uploaded: ${cfbHookMedia.length}/${cfbUrls.length}`);
+          console.log(`[post-thread] Madden-school hook images uploaded: ${hookMedia.length}/${downloaded.length}`);
         } else {
-          console.log(`[post-thread] Hook first line doesn't have PLAYBOOK, FORMATION format — skipping cfb.fan`);
+          console.log(`[post-thread] Hook first line doesn't have PLAYBOOK, FORMATION format — skipping madden-school`);
         }
       } else {
-        console.log(`[post-thread] Hook first line doesn't have em-dash separator — skipping cfb.fan`);
+        console.log(`[post-thread] Hook first line doesn't have em-dash separator — skipping madden-school`);
       }
-    } catch (cfbErr) {
-      console.error('[post-thread] cfb.fan scrape/upload failed (non-fatal):', cfbErr.message);
+    } catch (madErr) {
+      console.error('[post-thread] madden-school scrape/upload failed (non-fatal):', madErr.message);
     }
 
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
       const media = index === 0
-        ? (cfbHookMedia.length > 0 ? cfbHookMedia : allSectionMedia.slice(0, 4))
+        ? (hookMedia.length > 0 ? hookMedia : allSectionMedia.slice(0, 4))
         : section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
       return {
         status: text,
