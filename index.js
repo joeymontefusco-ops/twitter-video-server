@@ -3113,58 +3113,62 @@ async function scrapeMaddenSchool(playbookName, formationName) {
   let foundFormationFullSlug = null;
   let usedSide = null;
   const debugInfo = { playbookAttempts: [] };
-  for (const side of sides) {
-    const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
-    try {
-      const r = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0' } });
-      // Match both absolute (https://www.madden-school.com/...) and relative (/playbooks/...) hrefs
-      // Trailing slash optional
-      const re = new RegExp(`href=["'](?:https?://www\\.madden-school\\.com)?/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?["']`, 'gi');
-      const candidates = [...new Set([...r.data.matchAll(re)].map(m => `${m[1]}-${m[2]}`))];
-      debugInfo.playbookAttempts.push({
-        url,
-        status: r.status,
-        htmlLength: (r.data || '').length,
-        candidateCount: candidates.length,
-        sampleCandidates: candidates.slice(0, 10),
-      });
-      for (const candidate of candidates) {
-        const normalized = candidate.replace(/-+/g, '-');
-        if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
-          foundFormationFullSlug = candidate;
-          usedSide = side;
-          console.log(`[madden-scrape] Matched candidate="${candidate}"`);
-          break;
-        }
-      }
-      if (foundFormationFullSlug) break;
-    } catch (e) {
-      debugInfo.playbookAttempts.push({ url, error: e.message });
-      console.log(`[madden-scrape] Playbook page ${url} failed: ${e.message}`);
-    }
-  }
-
-  if (!foundFormationFullSlug) {
-    const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
-    err.debug = debugInfo;
-    throw err;
-  }
-
-  // Now render the formation SPA page with Puppeteer to extract play data
-  const formationUrl = `https://www.madden-school.com/formations/${foundFormationFullSlug}/${playbookSlug}/`;
-  console.log(`[madden-scrape] Rendering formation page: ${formationUrl}`);
-
   const browser = await puppeteer.launch({
     executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
     headless: 'new',
     args: ['--no-sandbox', '--disable-setuid-sandbox'],
   });
+
   try {
+    for (const side of sides) {
+      const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
+      try {
+        const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        const status = resp ? resp.status() : 0;
+        const html = await page.content();
+        await page.close();
+
+        const re = new RegExp(`href=["'](?:https?://www\\.madden-school\\.com)?/playbooks/${playbookSlug}/${side}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?["']`, 'gi');
+        const candidates = [...new Set([...html.matchAll(re)].map(m => `${m[1]}-${m[2]}`))];
+        debugInfo.playbookAttempts.push({
+          url,
+          status,
+          htmlLength: html.length,
+          candidateCount: candidates.length,
+          sampleCandidates: candidates.slice(0, 10),
+        });
+        for (const candidate of candidates) {
+          const normalized = candidate.replace(/-+/g, '-');
+          if (normalized === formationSlug || normalized.endsWith('-' + formationSlug)) {
+            foundFormationFullSlug = candidate;
+            usedSide = side;
+            console.log(`[madden-scrape] Matched candidate="${candidate}"`);
+            break;
+          }
+        }
+        if (foundFormationFullSlug) break;
+      } catch (e) {
+        debugInfo.playbookAttempts.push({ url, error: e.message });
+        console.log(`[madden-scrape] Playbook page ${url} failed: ${e.message}`);
+      }
+    }
+
+    if (!foundFormationFullSlug) {
+      const err = new Error(`Formation "${formationName}" not found in playbook "${playbookName}"`);
+      err.debug = debugInfo;
+      throw err;
+    }
+
+    // Now render the formation SPA page to extract play data
+    const formationUrl = `https://www.madden-school.com/formations/${foundFormationFullSlug}/${playbookSlug}/`;
+    console.log(`[madden-scrape] Rendering formation page: ${formationUrl}`);
+
     const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (compatible; TMA-Automation/1.0)');
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
     await page.setViewport({ width: 1400, height: 1000 });
     await page.goto(formationUrl, { waitUntil: 'networkidle0', timeout: 30000 });
-    // Wait for plays to render — look for `.card img` or any signal from the SPA
     try {
       await page.waitForFunction(
         () => document.querySelectorAll('img[src*="playbook_images"], img[src*="plays"]').length > 0,
@@ -3173,21 +3177,15 @@ async function scrapeMaddenSchool(playbookName, formationName) {
     } catch (e) {
       console.log(`[madden-scrape] Play images didn't render in time, extracting what's available`);
     }
-
-    // Give it another moment for lazy-load
     await new Promise(r => setTimeout(r, 1500));
 
-    // Extract all image URLs that look like play art
     const playData = await page.evaluate(() => {
       const results = [];
-      // Look at all images with "playbook" or "plays" in URL
       const imgs = document.querySelectorAll('img');
       for (const img of imgs) {
         const src = img.getAttribute('src') || img.getAttribute('data-src') || '';
         if (!src) continue;
-        // Only images from madden-school's playbook_images_m26 CDN, and only PLAY art (not formations)
         if (src.includes('playbook_images_m26') && !src.includes('formations/')) {
-          // Try to get the play name from a nearby element
           let name = '';
           const card = img.closest('a, .card, [class*="play"]');
           if (card) {
@@ -3201,6 +3199,7 @@ async function scrapeMaddenSchool(playbookName, formationName) {
       }
       return results;
     });
+    await page.close();
 
     const imageUrls = playData.map(p => p.url);
     const playNames = playData.map(p => p.name);
