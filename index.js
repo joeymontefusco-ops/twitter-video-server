@@ -2098,6 +2098,254 @@ async function renameDriveFile(driveFileId, title) {
 }
 
 // ─── Helper: notify editor in Discord ────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+// WordPress blog auto-post from Twitter thread
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Download an image from Firebase Storage → local /tmp path (helper for blog images)
+async function downloadFirebaseImageToTmp(fileName, jwtToken, index) {
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const encoded = encodeURIComponent(fileName);
+  const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
+  const localPath = path.join('/tmp', `blog_img_${Date.now()}_${index}.png`);
+  const r = await axios.get(url, {
+    responseType: 'arraybuffer',
+    timeout: 60000,
+    headers: { Authorization: `Firebase ${jwtToken}` },
+  });
+  fs.writeFileSync(localPath, Buffer.from(r.data));
+  return localPath;
+}
+
+// Upload a local image to WordPress via REST API. Returns { id, source_url }.
+async function uploadImageToWordPress(localPath, altText, filename) {
+  const wpUrl = process.env.WP_URL;
+  const wpUser = process.env.WP_USER;
+  const wpPass = process.env.WP_APP_PASSWORD;
+  if (!wpUrl || !wpUser || !wpPass) throw new Error('WP_URL/WP_USER/WP_APP_PASSWORD env vars not set');
+
+  const form = new FormData();
+  form.append('file', fs.createReadStream(localPath), { filename: filename || path.basename(localPath) });
+  form.append('alt_text', altText || '');
+  form.append('title', altText || '');
+
+  const auth = Buffer.from(`${wpUser}:${wpPass}`).toString('base64');
+  const resp = await axios.post(`${wpUrl}/wp-json/wp/v2/media`, form, {
+    headers: {
+      ...form.getHeaders(),
+      Authorization: `Basic ${auth}`,
+    },
+    maxContentLength: Infinity,
+    maxBodyLength: Infinity,
+    timeout: 60000,
+  });
+  return { id: resp.data.id, source_url: resp.data.source_url };
+}
+
+// Call OpenAI to convert a thread into a blog post + SEO metadata
+async function generateBlogFromThread(thread, imageCount) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY env var not set');
+
+  const internalLinks = [
+    { url: 'https://themaddenacademy.com/', text: '16 Spaces Playbook ($49)' },
+    { url: 'https://themaddenacademy.com/lifetime-membership-page', text: 'Grandmaster 27 lifetime membership ($495)' },
+    { url: 'https://themaddenacademy.com/train-with-manu-2', text: '1-on-1 coaching with Manu ($999/mo)' },
+    { url: 'https://themaddenacademy.com/category/madden-tips/', text: 'more Madden tips' },
+  ];
+
+  const threadText = [
+    thread.hook || '',
+    '',
+    ...(thread.sections || []).map(s => `## ${s.title || `Section ${s.number}`}\n${s.content || ''}`),
+    '',
+    thread.cta || '',
+  ].join('\n');
+
+  const systemPrompt = `You convert Twitter threads about Madden NFL 27 gameplay into SEO-optimized blog posts for themaddenacademy.com.
+
+Requirements:
+- 800-1200 words of natural prose (NOT bullet-point regurgitation of the thread)
+- H2 for each major section (use the section titles, cleaned up)
+- Weave in 2-3 of the internal links naturally where they fit contextually — never force them
+- One internal link per section maximum
+- Reference images inline using [IMAGE_1] [IMAGE_2] ... [IMAGE_${imageCount}] tokens where images should go (spread evenly through the article)
+- Include a strong intro paragraph (not the raw thread hook) that sets up the topic and hooks the reader
+- Include a conclusion paragraph with a soft CTA to one of the internal links
+- Write like a knowledgeable Madden coach — practical, specific, no fluff
+- Use present tense, active voice, second-person ("you")
+- Avoid AI-tell phrases like "in today's blog post", "let's dive in", "furthermore", "moreover"
+
+Internal links available:
+${internalLinks.map(l => `- ${l.text}: ${l.url}`).join('\n')}
+
+Return JSON only, no markdown fence:
+{
+  "title": "60-70 char SEO title with focus keyword front-loaded",
+  "metaDesc": "150-160 char meta description that would make someone click",
+  "focusKeyword": "the main keyword the article targets (2-4 words)",
+  "htmlBody": "the full article HTML with <h2>, <p>, <a>, and [IMAGE_N] placeholders. No <html>, <head>, or <body> tags — just the article content.",
+  "imageAlts": ["descriptive alt text for image 1", "for image 2", ...]
+}`;
+
+  const resp = await axios.post('https://api.openai.com/v1/chat/completions', {
+    model: 'gpt-4o-mini',
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: `Convert this thread into a blog post:\n\n${threadText}` },
+    ],
+    response_format: { type: 'json_object' },
+    temperature: 0.7,
+  }, {
+    headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+    timeout: 90000,
+  });
+
+  const raw = resp.data.choices?.[0]?.message?.content || '{}';
+  return JSON.parse(raw);
+}
+
+// Create the actual WordPress post via REST API
+async function createWordPressPost(data) {
+  const wpUrl = process.env.WP_URL;
+  const wpUser = process.env.WP_USER;
+  const wpPass = process.env.WP_APP_PASSWORD;
+  const auth = Buffer.from(`${wpUser}:${wpPass}`).toString('base64');
+
+  const payload = {
+    title: data.title,
+    content: data.htmlBody,
+    status: 'publish',
+    categories: [350], // Madden Tips
+    featured_media: data.featuredMediaId || 0,
+    meta: {
+      _yoast_wpseo_title: data.seoTitle || data.title,
+      _yoast_wpseo_metadesc: data.metaDesc || '',
+      _yoast_wpseo_focuskw: data.focusKeyword || '',
+      tma_thread_id: data.driveFileId,
+    },
+  };
+
+  const resp = await axios.post(`${wpUrl}/wp-json/wp/v2/posts`, payload, {
+    headers: { Authorization: `Basic ${auth}`, 'Content-Type': 'application/json' },
+    timeout: 60000,
+  });
+  return { id: resp.data.id, link: resp.data.link };
+}
+
+// Main orchestrator: gather thread data, generate blog, upload images, publish
+async function autoCreateBlogPost(driveFileId, row) {
+  // Dedup: if blogPostId already exists in sheet, skip
+  if (row.blogPostId && String(row.blogPostId).trim().length > 0) {
+    console.log(`[blog] Post already exists for ${driveFileId} (id=${row.blogPostId}) — skipping`);
+    return null;
+  }
+
+  // Env sanity
+  if (!process.env.WP_URL || !process.env.WP_USER || !process.env.WP_APP_PASSWORD || !process.env.OPENAI_API_KEY) {
+    console.log('[blog] Env vars incomplete — skipping (need WP_URL, WP_USER, WP_APP_PASSWORD, OPENAI_API_KEY)');
+    return null;
+  }
+
+  // Parse thread data from sheet
+  let thread;
+  try {
+    thread = JSON.parse(row.threadDataJson || '{}');
+  } catch (e) {
+    throw new Error(`Invalid threadDataJson in sheet: ${e.message}`);
+  }
+  if (!thread.sections || thread.sections.length === 0) {
+    throw new Error('threadDataJson has no sections');
+  }
+
+  let rawSectionMap;
+  try {
+    rawSectionMap = JSON.parse(row.sectionRawImageUrls || '{}');
+  } catch (e) {
+    rawSectionMap = {};
+  }
+
+  console.log(`[blog] Starting blog post creation for ${driveFileId}`);
+
+  // Refresh Firebase token
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const jwt = hypefuryToken;
+
+  // Download raw section frames from Firebase
+  const localImagePaths = [];
+  const sectionNumbers = thread.sections.map(s => s.number).sort((a, b) => a - b);
+  for (let i = 0; i < sectionNumbers.length; i++) {
+    const num = sectionNumbers[i];
+    const fileName = rawSectionMap[num] || rawSectionMap[String(num)];
+    if (!fileName) continue;
+    try {
+      const localPath = await downloadFirebaseImageToTmp(fileName, jwt, i);
+      localImagePaths.push(localPath);
+    } catch (e) {
+      console.error(`[blog] Failed to download section ${num} image:`, e.message);
+    }
+  }
+
+  if (localImagePaths.length === 0) {
+    console.warn('[blog] No images available — creating post without images');
+  }
+
+  try {
+    // Generate blog content via OpenAI
+    console.log('[blog] Calling OpenAI to generate blog content...');
+    const generated = await generateBlogFromThread(thread, localImagePaths.length);
+
+    // Upload each image to WordPress; substitute [IMAGE_N] tokens with <img> tags
+    const uploadedImages = [];
+    for (let i = 0; i < localImagePaths.length; i++) {
+      const altText = (generated.imageAlts && generated.imageAlts[i]) || `${generated.focusKeyword || 'Madden 27 play'} — image ${i + 1}`;
+      const filename = `tma-${driveFileId.substring(0, 8)}-${i + 1}.png`;
+      try {
+        const uploaded = await uploadImageToWordPress(localImagePaths[i], altText, filename);
+        uploadedImages.push(uploaded);
+        console.log(`[blog] Uploaded image ${i + 1}/${localImagePaths.length}: ${uploaded.source_url}`);
+      } catch (e) {
+        console.error(`[blog] Image ${i + 1} upload failed:`, e.message);
+      }
+    }
+
+    // Substitute [IMAGE_N] tokens with actual <img> tags
+    let htmlBody = generated.htmlBody || '';
+    for (let i = 0; i < uploadedImages.length; i++) {
+      const token = `[IMAGE_${i + 1}]`;
+      const altText = (generated.imageAlts && generated.imageAlts[i]) || '';
+      const imgTag = `<figure class="wp-block-image size-large"><img src="${uploadedImages[i].source_url}" alt="${altText.replace(/"/g, '&quot;')}" class="wp-image-${uploadedImages[i].id}"/></figure>`;
+      htmlBody = htmlBody.split(token).join(imgTag);
+    }
+    // Strip any remaining tokens (in case OpenAI referenced more images than we have)
+    htmlBody = htmlBody.replace(/\[IMAGE_\d+\]/g, '');
+
+    // Publish
+    const post = await createWordPressPost({
+      title: generated.title,
+      htmlBody,
+      seoTitle: generated.title,
+      metaDesc: generated.metaDesc,
+      focusKeyword: generated.focusKeyword,
+      featuredMediaId: uploadedImages[0]?.id || 0,
+      driveFileId,
+    });
+    console.log(`[blog] Published: ${post.link} (id=${post.id})`);
+
+    // Save blog post ID to sheet for dedup
+    try {
+      await updateSheetRow(row._rowIndex, { blogPostId: String(post.id) });
+    } catch (e) {
+      console.error('[blog] Failed to save blogPostId to sheet (non-fatal):', e.message);
+    }
+
+    return post;
+  } finally {
+    // Clean up temp images
+    localImagePaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
+  }
+}
+
 async function notifyEditorDiscord(title, driveFileId) {
   const link = `https://drive.google.com/file/d/${driveFileId}/view`;
   const content = `<@752357571255337052> 🎬 **New video posted!**\n\n**Title:** ${title}\n**Video:** ${link}`;
@@ -3581,6 +3829,15 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
               }
 
               await tryStartDrip(driveFileId);
+
+              // Auto-generate WordPress blog post from thread (fire-and-forget, deduped by blogPostId)
+              (async () => {
+                try {
+                  await autoCreateBlogPost(driveFileId, row);
+                } catch (blogErr) {
+                  console.error(`[blog] Auto-create failed for ${driveFileId} (non-fatal):`, blogErr.message);
+                }
+              })();
             }
             return;
           }
