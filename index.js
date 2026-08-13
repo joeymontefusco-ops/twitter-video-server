@@ -884,23 +884,121 @@ async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex
 
 // Card 1 play-art = the cfb.fan play image for the hook's playbook+formation.
 // Returns a local /tmp path, or null (→ caller falls back to the gameplay screenshot).
+// LLM-based extractor: given hook text of any format, extract {playbookName, formationName} or null.
+// Uses GPT-4o-mini (cheap, fast). Falls back cleanly if OPENAI_API_KEY missing or call fails.
+async function extractPlaybookFormationViaLLM(hookText) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) return null;
+  const prompt = `You extract Madden playbook and formation names from Twitter thread hooks.
+
+Hook: "${String(hookText || '').split('\n')[0]}"
+
+The hook describes a Madden 27 gameplay strategy. Extract:
+- playbook: the NFL playbook name (e.g. "San Francisco", "Kansas City", "New Orleans Saints", "Buccaneers"). Just the team/scheme name — no "PB" or "PLAYBOOK" suffix.
+- formation: the formation name (e.g. "Gun Bunch X Nasty", "Nickel Single Mug", "Gun Doubles Clamp Stack"). Include type prefix like "Gun"/"Singleback"/"Nickel"/etc. if present.
+
+If either isn't clearly identifiable, set it to null.
+
+Return JSON only (no markdown fence):
+{"playbook": "...", "formation": "..."}`;
+
+  try {
+    const resp = await axios.post('https://api.openai.com/v1/chat/completions', {
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' },
+      temperature: 0,
+    }, {
+      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      timeout: 15000,
+    });
+    const raw = resp.data.choices?.[0]?.message?.content || '{}';
+    const parsed = JSON.parse(raw);
+    if (parsed.playbook && parsed.formation) {
+      console.log(`[hook-parse] LLM extracted: playbook="${parsed.playbook}", formation="${parsed.formation}"`);
+      return { playbookName: parsed.playbook, formationName: parsed.formation };
+    }
+    return null;
+  } catch (e) {
+    console.error('[hook-parse] LLM extraction failed:', e.message);
+    return null;
+  }
+}
+
+// Resolve playbook + formation from thread object. Priority:
+//   1. Explicit thread.playbook + thread.formation fields (best — from n8n LLM output)
+//   2. LLM extraction from hook text (handles any format)
+//   3. Regex parsing of hook (fallback)
+async function resolvePlaybookFormation(thread) {
+  if (thread && thread.playbook && thread.formation) {
+    console.log(`[hook-parse] Using explicit fields: playbook="${thread.playbook}", formation="${thread.formation}"`);
+    return { playbookName: String(thread.playbook).trim(), formationName: String(thread.formation).trim() };
+  }
+  const llmResult = await extractPlaybookFormationViaLLM((thread && thread.hook) || '');
+  if (llmResult) return llmResult;
+  // Last-resort regex
+  const regexResult = parseHookForPlaybookFormation((thread && thread.hook) || '');
+  if (regexResult) console.log(`[hook-parse] Regex fallback matched: playbook="${regexResult.playbookName}", formation="${regexResult.formationName}"`);
+  return regexResult;
+}
+
+// Parse hook line for PLAYBOOK / FORMATION patterns. Returns {playbookName, formationName} or null.
+// Supports two formats:
+//   1. "TOPIC — PLAYBOOK, FORMATION, PLAY" (em-dash + commas)
+//   2. "TOPIC PLAYBOOK PB | FORMATION | PLAY" (pipe-separated, last 3 pipe segments)
+function parseHookForPlaybookFormation(hookText) {
+  const hookFirstLine = String(hookText || '').split('\n')[0];
+
+  // Format 2: pipe-separated (new format Manu uses)
+  if (hookFirstLine.includes('|')) {
+    const pipeParts = hookFirstLine.split('|').map(s =>
+      s.replace(/[()[\]{}]/g, '').replace(/\s+/g, ' ').trim()
+    ).filter(Boolean);
+    if (pipeParts.length >= 2) {
+      // Last 3 segments should be: [PLAYBOOK, FORMATION, PLAY] but sometimes only [FORMATION, PLAY]
+      // Playbook usually ends with " PB" — strip it
+      let playbookRaw, formationRaw;
+      if (pipeParts.length >= 3) {
+        playbookRaw = pipeParts[pipeParts.length - 3];
+        formationRaw = pipeParts[pipeParts.length - 2];
+      } else {
+        // Only 2 segments — assume first is FORMATION | PLAY; playbook is elsewhere in hook
+        return null;
+      }
+      // Playbook is Title Case city/team name before " PB" (e.g. "San Francisco PB", "Kansas City PB")
+      // NOT the ALL-CAPS words that are part of the hook topic
+      const pbMatch = playbookRaw.match(/([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)\s+PB\b/);
+      const playbookName = pbMatch ? pbMatch[1].trim() : playbookRaw.replace(/\s+PB\b/i, '').trim();
+      return { playbookName, formationName: formationRaw };
+    }
+  }
+
+  // Format 1: em-dash + comma separated (legacy)
+  const dashSplit = hookFirstLine.split(/\s+—\s+|\s+-\s+/);
+  if (dashSplit.length < 2) return null;
+  const afterDash = dashSplit[dashSplit.length - 1];
+  const parts = afterDash.split(',').map(s =>
+    s.replace(/[()[\]{}]/g, '').replace(/\s+/g, ' ').trim()
+  ).filter(Boolean);
+  if (parts.length < 2) return null;
+  return { playbookName: parts[0], formationName: parts[1] };
+}
+
 async function getPlaybookPlayArt(thread) {
   try {
-    const hookFirstLine = ((thread && thread.hook) || '').split('\n')[0];
-    const dashSplit = hookFirstLine.split(/\s+—\s+|\s+-\s+/);
-    if (dashSplit.length < 2) return null;
-    const parts = dashSplit[dashSplit.length - 1].split(',').map(s => s.trim()).filter(Boolean);
-    if (parts.length < 2) return null;
-    const [playbookName, formationName] = parts;
-    const scrape = await scrapeCfbFan(playbookName, formationName);
-    const firstUrl = (scrape.imageUrls || [])[0];
-    if (!firstUrl) return null;
-    const p = path.join('/tmp', `fb_cfb_playart_${Date.now()}.jpg`);
-    const dl = await axios.get(firstUrl, { responseType: 'arraybuffer', timeout: 30000 });
-    fs.writeFileSync(p, Buffer.from(dl.data));
+    const parsed = await resolvePlaybookFormation(thread);
+    if (!parsed) return null;
+    const { playbookName, formationName } = parsed;
+    console.log(`[fb-playart] Attempting madden-school scrape for FB card: playbook="${playbookName}", formation="${formationName}"`);
+    const scrape = await scrapeMaddenSchool(playbookName, formationName);
+    const downloaded = (scrape.downloadedImages || [])[0];
+    if (!downloaded || !downloaded.base64) return null;
+    const p = path.join('/tmp', `fb_playart_${Date.now()}.png`);
+    fs.writeFileSync(p, Buffer.from(downloaded.base64, 'base64'));
+    console.log(`[fb-playart] Downloaded first play art from madden-school`);
     return p;
   } catch (e) {
-    console.error('[fb] cfb.fan play-art fetch failed (using screenshot fallback):', e.message);
+    console.error('[fb-playart] madden-school play-art fetch failed (using screenshot fallback):', e.message);
     return null;
   }
 }
@@ -2544,37 +2642,29 @@ app.post('/post-thread', async (req, res) => {
 
     const allSectionMedia = Object.values(sectionMediaMap);
 
-    // ── Madden-school.com hook images: parse hook for "— PLAYBOOK, FORMATION" and scrape
+    // ── Madden-school.com hook images: resolve playbook/formation and scrape
     let hookMedia = [];
     try {
-      const hookFirstLine = (thread.hook || '').split('\n')[0];
-      const dashSplit = hookFirstLine.split(/\s+—\s+|\s+-\s+/); // em-dash or hyphen with spaces
-      if (dashSplit.length >= 2) {
-        const afterDash = dashSplit[dashSplit.length - 1];
-        const parts = afterDash.split(',').map(s => s.trim()).filter(Boolean);
-        if (parts.length >= 2) {
-          const playbookName = parts[0];
-          const formationName = parts[1];
-          console.log(`[post-thread] Attempting madden-school scrape: playbook="${playbookName}", formation="${formationName}"`);
-          const scrapeResult = await scrapeMaddenSchool(playbookName, formationName);
-          const downloaded = scrapeResult.downloadedImages || [];
-          for (let i = 0; i < downloaded.length; i++) {
-            try {
-              const tmpImg = path.join('/tmp', `mad_hook_${Date.now()}_${i}.png`);
-              fs.writeFileSync(tmpImg, Buffer.from(downloaded[i].base64, 'base64'));
-              const media = await uploadImageVerified(tmpImg, token);
-              try { fs.unlinkSync(tmpImg); } catch (e) {}
-              if (media) hookMedia.push(media);
-            } catch (e) {
-              console.error(`[post-thread] Madden-school image ${i + 1} upload failed:`, e.message);
-            }
+      const parsed = await resolvePlaybookFormation(thread);
+      if (parsed) {
+        const { playbookName, formationName } = parsed;
+        console.log(`[post-thread] Attempting madden-school scrape: playbook="${playbookName}", formation="${formationName}"`);
+        const scrapeResult = await scrapeMaddenSchool(playbookName, formationName);
+        const downloaded = scrapeResult.downloadedImages || [];
+        for (let i = 0; i < downloaded.length; i++) {
+          try {
+            const tmpImg = path.join('/tmp', `mad_hook_${Date.now()}_${i}.png`);
+            fs.writeFileSync(tmpImg, Buffer.from(downloaded[i].base64, 'base64'));
+            const media = await uploadImageVerified(tmpImg, token);
+            try { fs.unlinkSync(tmpImg); } catch (e) {}
+            if (media) hookMedia.push(media);
+          } catch (e) {
+            console.error(`[post-thread] Madden-school image ${i + 1} upload failed:`, e.message);
           }
-          console.log(`[post-thread] Madden-school hook images uploaded: ${hookMedia.length}/${downloaded.length}`);
-        } else {
-          console.log(`[post-thread] Hook first line doesn't have PLAYBOOK, FORMATION format — skipping madden-school`);
         }
+        console.log(`[post-thread] Madden-school hook images uploaded: ${hookMedia.length}/${downloaded.length}`);
       } else {
-        console.log(`[post-thread] Hook first line doesn't have em-dash separator — skipping madden-school`);
+        console.log(`[post-thread] Could not resolve playbook/formation from hook — skipping madden-school`);
       }
     } catch (madErr) {
       console.error('[post-thread] madden-school scrape/upload failed (non-fatal):', madErr.message);
