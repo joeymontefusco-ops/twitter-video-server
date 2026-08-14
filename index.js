@@ -3452,8 +3452,8 @@ app.post('/test-aerielab-history', async (req, res) => {
           },
         },
         orderBy: [
-          { field: { fieldPath: 'time' }, direction: 'DESCENDING' },
-          { field: { fieldPath: '__name__' }, direction: 'DESCENDING' },
+          { field: { fieldPath: 'time' }, direction: 'ASCENDING' },
+          { field: { fieldPath: '__name__' }, direction: 'ASCENDING' },
         ],
         limit,
       },
