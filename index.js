@@ -3426,7 +3426,7 @@ async function captionImage(inputPath, captionText = null) {
 // ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
 // ─── /test-aerielab-history — query Firestore for TMA published threads ──
 app.post('/test-aerielab-history', async (req, res) => {
-  const { limit = 5, minutesBack = 60 } = req.body;
+  const { limit = 5, minutesBack = 60, collection = 'threads' } = req.body;
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
     const jwt = hypefuryToken;
@@ -3437,15 +3437,12 @@ app.post('/test-aerielab-history', async (req, res) => {
 
     const query = {
       structuredQuery: {
-        from: [{ collectionId: 'threads' }],
+        from: [{ collectionId: collection }],
         where: {
           compositeFilter: {
             op: 'AND',
             filters: [
-              { fieldFilter: { field: { fieldPath: 'deleted' }, op: 'EQUAL', value: { booleanValue: false } } },
               { fieldFilter: { field: { fieldPath: 'user' }, op: 'EQUAL', value: { referenceValue: userRef } } },
-              { fieldFilter: { field: { fieldPath: 'postNow' }, op: 'EQUAL', value: { booleanValue: false } } },
-              { fieldFilter: { field: { fieldPath: 'scheduled' }, op: 'EQUAL', value: { booleanValue: false } } },
               { fieldFilter: { field: { fieldPath: 'time' }, op: 'GREATER_THAN_OR_EQUAL', value: { timestampValue: fromTime } } },
               { fieldFilter: { field: { fieldPath: 'time' }, op: 'LESS_THAN_OR_EQUAL', value: { timestampValue: toTime } } },
             ],
