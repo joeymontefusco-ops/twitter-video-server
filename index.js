@@ -3424,6 +3424,79 @@ async function captionImage(inputPath, captionText = null) {
 
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
 // ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
+// ─── /test-aerielab-history — query Firestore for TMA published threads ──
+app.post('/test-aerielab-history', async (req, res) => {
+  const { limit = 5, minutesBack = 60 } = req.body;
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+    const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+    const userRef = `projects/${project}/databases/(default)/documents/users/pLvmUtGBDvhoaiQRRkWVy29QwMr1`;
+    const fromTime = new Date(Date.now() - minutesBack * 60 * 1000).toISOString();
+    const toTime = new Date().toISOString();
+
+    const query = {
+      structuredQuery: {
+        from: [{ collectionId: 'threads' }],
+        where: {
+          compositeFilter: {
+            op: 'AND',
+            filters: [
+              { fieldFilter: { field: { fieldPath: 'deleted' }, op: 'EQUAL', value: { booleanValue: false } } },
+              { fieldFilter: { field: { fieldPath: 'user' }, op: 'EQUAL', value: { referenceValue: userRef } } },
+              { fieldFilter: { field: { fieldPath: 'postNow' }, op: 'EQUAL', value: { booleanValue: false } } },
+              { fieldFilter: { field: { fieldPath: 'scheduled' }, op: 'EQUAL', value: { booleanValue: false } } },
+              { fieldFilter: { field: { fieldPath: 'time' }, op: 'GREATER_THAN_OR_EQUAL', value: { timestampValue: fromTime } } },
+              { fieldFilter: { field: { fieldPath: 'time' }, op: 'LESS_THAN_OR_EQUAL', value: { timestampValue: toTime } } },
+            ],
+          },
+        },
+        orderBy: [
+          { field: { fieldPath: 'time' }, direction: 'DESCENDING' },
+          { field: { fieldPath: '__name__' }, direction: 'DESCENDING' },
+        ],
+        limit,
+      },
+    };
+
+    const url = `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents:runQuery`;
+    const resp = await axios.post(url, query, {
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    });
+
+    // Return a simplified view: docId + selected fields for inspection
+    const docs = (resp.data || []).filter(r => r.document).map(r => {
+      const doc = r.document;
+      const name = doc.name || '';
+      const docId = name.split('/').pop();
+      const fields = doc.fields || {};
+      return {
+        docId,
+        allFieldKeys: Object.keys(fields),
+        time: fields.time?.timestampValue,
+        scheduled: fields.scheduled?.booleanValue,
+        postNow: fields.postNow?.booleanValue,
+        deleted: fields.deleted?.booleanValue,
+        tweetsSummary: fields.tweets?.arrayValue?.values?.[0]?.mapValue?.fields
+          ? {
+              firstTweetKeys: Object.keys(fields.tweets.arrayValue.values[0].mapValue.fields),
+              firstTweetStatusPreview: (fields.tweets.arrayValue.values[0].mapValue.fields.status?.stringValue || '').substring(0, 200),
+            }
+          : null,
+        // Include any field that might be a recurring reference
+        recurrentRelated: Object.entries(fields)
+          .filter(([k]) => /recur|repost|parent|source|origin|clone/i.test(k))
+          .reduce((acc, [k, v]) => ({ ...acc, [k]: v }), {}),
+      };
+    });
+
+    res.json({ success: true, docCount: docs.length, docs, sampleRawDoc: resp.data?.[0]?.document || null });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message, status: err.response?.status, data: err.response?.data });
+  }
+});
+
 // ─── /test-madden-image — try fetching a play image directly (bypass HTML scraping) ──
 app.post('/test-madden-image', async (req, res) => {
   const { formation, play } = req.body;
