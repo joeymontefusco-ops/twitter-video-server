@@ -4750,10 +4750,260 @@ app.get('/test-sheets', async (req, res) => {
   }
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Aerielab recurring-repost detector: watches Firestore for auto-cloned TMA posts,
+// scrapes madden-school for hook images, posts them as a QT of the recurring tweet.
+// ═══════════════════════════════════════════════════════════════════════════
+
+const processedRecurringDocIds = new Set(); // in-memory dedup (survives while server up)
+const RECURRING_QT_POLL_MS = 5 * 60 * 1000; // every 5 min
+const RECURRING_LOOKBACK_MIN = 15; // catch anything published in the last 15 min
+
+// Query Aerielab's `threads` collection in Firestore for TMA docs within a time window.
+// Returns lightweight objects: { docId, tweetId, isCloned, published, clonedFromPost, firstTweetStatus }
+async function queryTmaThreadsFirestore(minutesBack, limit = 20) {
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const jwt = hypefuryToken;
+  const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+  const userRef = `projects/${project}/databases/(default)/documents/users/${TMA_USER_ID_CONST}`;
+  const fromTime = new Date(Date.now() - minutesBack * 60 * 1000).toISOString();
+  const toTime = new Date().toISOString();
+
+  const query = {
+    structuredQuery: {
+      from: [{ collectionId: 'threads' }],
+      where: {
+        compositeFilter: {
+          op: 'AND',
+          filters: [
+            { fieldFilter: { field: { fieldPath: 'user' }, op: 'EQUAL', value: { referenceValue: userRef } } },
+            { fieldFilter: { field: { fieldPath: 'time' }, op: 'GREATER_THAN_OR_EQUAL', value: { timestampValue: fromTime } } },
+            { fieldFilter: { field: { fieldPath: 'time' }, op: 'LESS_THAN_OR_EQUAL', value: { timestampValue: toTime } } },
+          ],
+        },
+      },
+      orderBy: [
+        { field: { fieldPath: 'time' }, direction: 'ASCENDING' },
+        { field: { fieldPath: '__name__' }, direction: 'ASCENDING' },
+      ],
+      limit,
+    },
+  };
+
+  const url = `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents:runQuery`;
+  const resp = await axios.post(url, query, {
+    headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+    timeout: 20000,
+  });
+
+  return (resp.data || []).filter(r => r.document).map(r => {
+    const doc = r.document;
+    const docId = (doc.name || '').split('/').pop();
+    const fields = doc.fields || {};
+    const firstTweet = fields.tweets?.arrayValue?.values?.[0]?.mapValue?.fields;
+    return {
+      docId,
+      tweetId: fields.tweetId?.stringValue || null,
+      time: fields.time?.timestampValue || null,
+      isCloned: fields.isCloned?.booleanValue === true,
+      published: fields.published?.booleanValue === true,
+      clonedFromPost: fields.clonedFromPost?.referenceValue || null,
+      firstTweetStatus: firstTweet?.status?.stringValue || null,
+      firstTweetTweetId: firstTweet?.tweetId?.stringValue || null,
+    };
+  });
+}
+
+// Fetch a single Firestore doc by its full reference path
+async function getFirestoreDocByRef(refPath) {
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const jwt = hypefuryToken;
+  // refPath looks like "projects/curious-meadow/databases/(default)/documents/threads/XXX"
+  const url = `https://firestore.googleapis.com/v1/${refPath}`;
+  const resp = await axios.get(url, {
+    headers: { Authorization: `Bearer ${jwt}` },
+    timeout: 15000,
+  });
+  return resp.data;
+}
+
+// Find sheet row where threadDataJson.hook starts with the given text (first-line match)
+async function findSheetRowByHookText(text) {
+  if (!text) return null;
+  const firstLineText = String(text).split('\n')[0].trim();
+  const rows = await readSheet();
+  for (const row of rows) {
+    if (!row.threadDataJson) continue;
+    try {
+      const td = JSON.parse(row.threadDataJson);
+      const rowHookFirstLine = String(td.hook || '').split('\n')[0].trim();
+      if (rowHookFirstLine && rowHookFirstLine === firstLineText) return row;
+    } catch (e) {}
+  }
+  // Fallback: fuzzy match (contains)
+  for (const row of rows) {
+    if (!row.threadDataJson) continue;
+    try {
+      const td = JSON.parse(row.threadDataJson);
+      const rowHook = String(td.hook || '').trim();
+      if (rowHook && (rowHook.includes(firstLineText) || firstLineText.includes(rowHook.split('\n')[0].trim()))) return row;
+    } catch (e) {}
+  }
+  return null;
+}
+
+// Post a multi-image quote tweet from TMA account
+async function postImagesAsQuoteTweet(mediaArray, quoteTweetData, commentText, userId) {
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const token = hypefuryToken;
+
+  const payload = {
+    currentUserId: userId,
+    post: {
+      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+      slotType: 'post',
+      time: new Date().toISOString(),
+      scheduled: false,
+      user: userId,
+      publishingError: null,
+      deleted: false,
+      tweets: [{
+        status: commentText,
+        count: 0,
+        media: mediaArray,
+        guid: uuidv4(),
+        published: false,
+        quoteTweetData,
+        isTrusted: true,
+      }],
+      categories: [],
+      shareOnInstagram: false,
+      linkedIn: null,
+      facebook: null,
+      threads: null,
+    },
+  };
+
+  const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Origin: 'https://app.aerielab.co',
+      Referer: 'https://app.aerielab.co/queue',
+      'User-Agent': 'Mozilla/5.0',
+    },
+  });
+  return resp.data;
+}
+
+// Main polling function — runs every 5 min
+async function checkForRecurringReposts() {
+  try {
+    const docs = await queryTmaThreadsFirestore(RECURRING_LOOKBACK_MIN, 20);
+    const candidates = docs.filter(d =>
+      d.isCloned && d.published && d.clonedFromPost && d.tweetId
+      && !processedRecurringDocIds.has(d.docId)
+    );
+    if (candidates.length === 0) return;
+    console.log(`[recurring] Found ${candidates.length} unprocessed recurring repost(s)`);
+
+    for (const doc of candidates) {
+      processedRecurringDocIds.add(doc.docId);
+      try {
+        // Get original thread's first-tweet text to match against sheet
+        const originalDoc = await getFirestoreDocByRef(doc.clonedFromPost);
+        const originalFirstTweet = originalDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields;
+        const originalText = originalFirstTweet?.status?.stringValue
+          || doc.firstTweetStatus
+          || '';
+        if (!originalText) {
+          console.log(`[recurring] ${doc.docId}: no original text found — skipping`);
+          continue;
+        }
+
+        // Match to sheet row
+        const sheetRow = await findSheetRowByHookText(originalText);
+        if (!sheetRow) {
+          console.log(`[recurring] ${doc.docId}: no sheet row match — skipping`);
+          continue;
+        }
+        const thread = JSON.parse(sheetRow.threadDataJson || '{}');
+
+        // Resolve playbook/formation
+        const parsed = await resolvePlaybookFormation(thread);
+        if (!parsed) {
+          console.log(`[recurring] ${doc.docId}: could not resolve playbook/formation — skipping`);
+          continue;
+        }
+
+        // Scrape madden-school
+        let scrape;
+        try {
+          scrape = await scrapeMaddenSchool(parsed.playbookName, parsed.formationName);
+        } catch (scrapeErr) {
+          console.log(`[recurring] ${doc.docId}: madden-school scrape failed — skipping. Error: ${scrapeErr.message}`);
+          continue;
+        }
+        const downloaded = (scrape.downloadedImages || []).slice(0, 4);
+        if (downloaded.length === 0) {
+          console.log(`[recurring] ${doc.docId}: no images returned from scrape — skipping`);
+          continue;
+        }
+
+        // Upload images to Aerielab
+        if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+        const jwt = hypefuryToken;
+        const uploaded = [];
+        for (let i = 0; i < downloaded.length; i++) {
+          try {
+            const tmpImg = path.join('/tmp', `rec_${Date.now()}_${i}.png`);
+            fs.writeFileSync(tmpImg, Buffer.from(downloaded[i].base64, 'base64'));
+            const media = await uploadImageVerified(tmpImg, jwt);
+            try { fs.unlinkSync(tmpImg); } catch (e) {}
+            if (media) uploaded.push(media);
+          } catch (e) {
+            console.error(`[recurring] Image ${i + 1} upload failed:`, e.message);
+          }
+        }
+        if (uploaded.length === 0) {
+          console.log(`[recurring] ${doc.docId}: no images uploaded — skipping`);
+          continue;
+        }
+
+        // Build QT data pointing to the just-published recurring tweet
+        const quoteTweetData = {
+          tweetId: doc.tweetId,
+          userScreenName: 'MaddenAcademy_',
+          text: doc.firstTweetStatus || originalText,
+        };
+
+        const title = (originalText || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
+        const commentText = `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's MENTAL chess match`;
+
+        await postImagesAsQuoteTweet(uploaded, quoteTweetData, commentText, TMA_USER_ID_CONST);
+        console.log(`[recurring] ✅ Posted QT for recurring repost ${doc.docId} (tweetId=${doc.tweetId})`);
+      } catch (e) {
+        console.error(`[recurring] ${doc.docId} failed:`, e.message);
+      }
+    }
+  } catch (err) {
+    console.error('[recurring] Poll cycle failed:', err.message);
+  }
+}
+
+function startRecurringRepostPoller() {
+  console.log(`[recurring] Starting poller (every ${RECURRING_QT_POLL_MS / 1000 / 60} min, lookback ${RECURRING_LOOKBACK_MIN} min)`);
+  // Initial run after 30s (let token refresh settle), then interval
+  setTimeout(() => checkForRecurringReposts(), 30000);
+  setInterval(checkForRecurringReposts, RECURRING_QT_POLL_MS);
+}
+
 app.listen(PORT, () => {
   console.log(`Twitter video server running on port ${PORT}`);
   refreshHypefuryToken();
   // Resume any in-progress drips after restart
   setTimeout(() => resumeDrips(), 10000); // wait 10s for token to be ready
   setTimeout(() => resumeWatches(), 12000); // slightly after drips to avoid race
+  // Start Aerielab recurring-repost poller (5 min interval)
+  startRecurringRepostPoller();
 });
