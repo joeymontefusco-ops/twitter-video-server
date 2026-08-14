@@ -2832,15 +2832,15 @@ app.post('/post-thread', async (req, res) => {
     console.log('[post-thread] Thread posted successfully:', response.data);
 
     // Save raw section image filenames + thread structure to sheet for TMA chapter drip stages
-    try {
-      if (!skipHypefury) {
-        const rowForSheet = await findSheetRow('driveFileId', driveFileId);
-        if (rowForSheet) {
+    // NOTE: n8n creates the sheet row AFTER /post-thread returns, so we can't find the row immediately.
+    // Fire-and-forget with retry: wait, then keep trying until the row appears or we give up.
+    if (!skipHypefury) {
+      (async () => {
+        try {
           const sheetUpdates = {};
           if (Object.keys(sectionRawMediaMap).length > 0) {
             sheetUpdates.sectionRawImageUrls = JSON.stringify(sectionRawMediaMap);
           }
-          // Save minimal thread data (hook + sections) for chapter/summary/like renders
           sheetUpdates.threadDataJson = JSON.stringify({
             hook: thread.hook || '',
             sections: (thread.sections || []).map(s => ({
@@ -2849,12 +2849,24 @@ app.post('/post-thread', async (req, res) => {
               content: s.content,
             })),
           });
+          // Retry up to 6 times, waiting 15s between attempts (total ~90s window for n8n to create the row)
+          let rowForSheet = null;
+          for (let attempt = 1; attempt <= 6; attempt++) {
+            await new Promise(r => setTimeout(r, 15000));
+            rowForSheet = await findSheetRow('driveFileId', driveFileId);
+            if (rowForSheet) break;
+            console.log(`[post-thread] Sheet row not yet created for ${driveFileId} (attempt ${attempt}/6) — waiting…`);
+          }
+          if (!rowForSheet) {
+            console.error(`[post-thread] Gave up waiting for sheet row for ${driveFileId} after 6 attempts (~90s). TMA drip + blog auto-create will not work for this thread.`);
+            return;
+          }
           await updateSheetRow(rowForSheet._rowIndex, sheetUpdates);
           console.log(`[post-thread] Saved section URLs (${Object.keys(sectionRawMediaMap).length}) + thread data to sheet for TMA drip`);
+        } catch (sheetErr) {
+          console.error('[post-thread] Failed to save section URLs/thread data to sheet (non-fatal):', sheetErr.message);
         }
-      }
-    } catch (sheetErr) {
-      console.error('[post-thread] Failed to save section URLs/thread data to sheet (non-fatal):', sheetErr.message);
+      })();
     }
 
     // Send response to caller immediately — don't block on Facebook
