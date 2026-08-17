@@ -699,7 +699,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     name: fileName,
     type: 'image/png',
     size: fileSize,
-    altText: 'CFB 27 tips',
+    altText: 'Madden 27 tips',
     thumbnail: thumbnailName,
   };
 }
@@ -1483,7 +1483,7 @@ async function executeDripStep(driveFileId, stage) {
         for (const uid of qtUserIds) {
           const isSelfQt = uid === TMA_USER_ID;
           const handle = isSelfQt ? '@MaddenAcademy_' : '@ManuGinobili987';
-          const commentText = `${title} Part ${partNum}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+          const commentText = `${title} Part ${partNum}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
           try {
             await postClipQuoteTweet(clipUrl, quoteTweetData, commentText, uid);
           } catch (e) {
@@ -1499,7 +1499,7 @@ async function executeDripStep(driveFileId, stage) {
       for (const uid of qtUserIds) {
         const isSelfQt = uid === TMA_USER_ID;
         const handle = isSelfQt ? '@MaddenAcademy_' : '@ManuGinobili987';
-        const commentText = `${title}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+        const commentText = `${title}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
         try {
           await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
         } catch (e) {
@@ -1808,7 +1808,7 @@ async function executeTmaDripStep(driveFileId, stage) {
     if (stage.startsWith('tmaClip') && stage !== 'tmaChapter') {
       const clipIdx = parseInt(stage.replace('tmaClip', '')) - 1;
       if (clipData[clipIdx]) {
-        const commentText = `${title} Part ${clipIdx + 1}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+        const commentText = `${title} Part ${clipIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
         await postClipQuoteTweet(clipData[clipIdx].url, quoteTweetData, commentText, uid);
       } else {
         console.log(`[tma-drip] No clip at index ${clipIdx} — skipping ${stage}`);
@@ -1828,7 +1828,7 @@ async function executeTmaDripStep(driveFileId, stage) {
           const cardBuf = await buildFacebookSectionImage(localFrame, sections[chapterIdx], chapterIdx, sections.length, threadForRender);
           const tmpCard = path.join('/tmp', `tma_chapter_${Date.now()}_${chapterIdx + 1}.png`);
           fs.writeFileSync(tmpCard, cardBuf);
-          const commentText = `${title} — Chapter ${chapterIdx + 1}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+          const commentText = `${title} — Chapter ${chapterIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
           try {
             await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
           } finally {
@@ -1845,14 +1845,14 @@ async function executeTmaDripStep(driveFileId, stage) {
 
     } else if (stage === 'tmaFullVideo') {
       const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
-      const commentText = `${title}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+      const commentText = `${title}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
       await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
 
     } else if (stage === 'tmaSummary') {
       const cardBuf = await buildFacebookSummaryImage(threadForRender);
       const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
       fs.writeFileSync(tmpCard, cardBuf);
-      const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+      const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
       try {
         await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
       } finally {
@@ -1863,7 +1863,7 @@ async function executeTmaDripStep(driveFileId, stage) {
       const cardBuf = await buildFacebookLikeGraphic(threadForRender);
       const tmpCard = path.join('/tmp', `tma_like_${Date.now()}.png`);
       fs.writeFileSync(tmpCard, cardBuf);
-      const commentText = `Like this post ❤️ to unlock the 16 Spaces Playbook — free.\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+      const commentText = `Like this post ❤️ to unlock the 16 Spaces Playbook — free.\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
       try {
         await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
       } finally {
@@ -1970,7 +1970,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title, overrideUserId = 
   const userId = overrideUserId || process.env.QT_USER_ID || 'Jc9SLRhASBPPGTA6CK53BOOUTeW2';
   const isSelfQt = userId === 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
   const handle = isSelfQt ? '@MaddenAcademy_' : '@ManuGinobili987';
-  const status = `${title}\n\nFollow ${handle} for daily help mastering CFB 27's MENTAL chess match`;
+  const status = `${title}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
 
   const payload = {
     currentUserId: userId,
@@ -2755,7 +2755,7 @@ app.post('/post-thread', async (req, res) => {
           minRetweets: null,
           minFavorites: 1,
           templateName: null,
-          status: 'Become a smarter CFB player in 7 days here: https://themaddenacademy.com/?utm_source=twitter_x02&utm_medium=organic_social',
+          status: 'Become a smarter Madden player in 7 days here: https://themaddenacademy.com/?utm_source=twitter_x02&utm_medium=organic_social',
         },
         postNow: false,
         source: null,
@@ -4978,7 +4978,7 @@ async function checkForRecurringReposts() {
         };
 
         const title = (originalText || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
-        const commentText = `${title}\n\nFollow @MaddenAcademy_ for daily help mastering CFB 27's MENTAL chess match`;
+        const commentText = `${title}\n\nFollow @MaddenAcademy_ for daily help mastering Madden 27's MENTAL chess match`;
 
         await postImagesAsQuoteTweet(uploaded, quoteTweetData, commentText, TMA_USER_ID_CONST);
         console.log(`[recurring] ✅ Posted QT for recurring repost ${doc.docId} (tweetId=${doc.tweetId})`);
