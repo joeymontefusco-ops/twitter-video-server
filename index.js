@@ -3449,6 +3449,38 @@ async function captionImage(inputPath, captionText = null) {
 // ─── /test-caption (returns a Firebase URL to preview the captioned image) ─
 // ─── /test-facebook (posts to TMA's FB page from an array of image URLs) ──
 // ─── /test-aerielab-history — query Firestore for TMA published threads ──
+// ─── /test-aerielab-category — look up a category doc's name by ID ──
+// ─── /test-aerielab-thread — fetch a full thread doc by ID (raw, for field inspection) ──
+app.post('/test-aerielab-thread', async (req, res) => {
+  const { docId } = req.body;
+  if (!docId) return res.status(400).json({ error: 'Missing docId' });
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+    const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+    const url = `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents/threads/${docId}`;
+    const resp = await axios.get(url, { headers: { Authorization: `Bearer ${jwt}` }, timeout: 15000 });
+    res.json({ success: true, doc: resp.data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message, status: err.response?.status, data: err.response?.data });
+  }
+});
+
+app.post('/test-aerielab-category', async (req, res) => {
+  const { categoryId } = req.body;
+  if (!categoryId) return res.status(400).json({ error: 'Missing categoryId' });
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+    const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+    const url = `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents/categories/${categoryId}`;
+    const resp = await axios.get(url, { headers: { Authorization: `Bearer ${jwt}` }, timeout: 15000 });
+    res.json({ success: true, doc: resp.data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message, status: err.response?.status, data: err.response?.data });
+  }
+});
+
 app.post('/test-aerielab-history', async (req, res) => {
   const { limit = 5, minutesBack = 60, collection = 'threads' } = req.body;
   try {
@@ -4786,6 +4818,236 @@ async function postImagesAsQuoteTweet(mediaArray, quoteTweetData, commentText, u
 }
 
 // Main polling function — runs every 5 min
+// ═══════════════════════════════════════════════════════════════════════════
+// "Settle the Debate" auto-graphic: detects debate/discussion posts, waits 2 days,
+// generates a branded graphic using the debate question + original images, posts
+// standalone to FB + Twitter (TMA).
+// ═══════════════════════════════════════════════════════════════════════════
+
+const processedDebateDocIds = new Set(); // in-memory dedup
+const DEBATE_POLL_MS = 15 * 60 * 1000; // every 15 min (less time-sensitive than recurring QTs)
+const DEBATE_LOOKBACK_MIN = 60 * 24 * 3; // scan last 3 days for newly-published debate posts
+const DEBATE_DELAY_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
+
+// Detect if a thread doc's first tweet is a "Settle the debate" post
+function isDebatePost(firstTweetStatus) {
+  return /settle the debate/i.test(firstTweetStatus || '');
+}
+
+// Extract the debate question from the tweet text.
+// Format: "Settle the debate:\n\n<question line(s)>"
+function extractDebateQuestion(text) {
+  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
+  // First line is "Settle the debate:" — question is everything after
+  const idx = lines.findIndex(l => /settle the debate/i.test(l));
+  const questionLines = idx >= 0 ? lines.slice(idx + 1) : lines.slice(1);
+  return questionLines.join(' ').trim() || lines.slice(-1)[0] || '';
+}
+
+// Download images attached to a Firestore tweet's `media` field.
+// Aerielab media objects typically have a `.url` or `.name` (Firebase storage filename).
+async function downloadTweetMediaImages(mediaFieldValue, jwtToken) {
+  const values = mediaFieldValue?.arrayValue?.values || [];
+  const localPaths = [];
+  for (let i = 0; i < values.length; i++) {
+    const mediaObj = values[i]?.mapValue?.fields;
+    if (!mediaObj) continue;
+    const url = mediaObj.url?.stringValue || mediaObj.source_url?.stringValue || null;
+    const fileName = mediaObj.name?.stringValue || null;
+    try {
+      let buffer;
+      if (url) {
+        const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
+        buffer = Buffer.from(r.data);
+      } else if (fileName) {
+        const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+        const encoded = encodeURIComponent(fileName);
+        const fUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
+        const r = await axios.get(fUrl, { responseType: 'arraybuffer', timeout: 30000, headers: { Authorization: `Firebase ${jwtToken}` } });
+        buffer = Buffer.from(r.data);
+      } else {
+        continue;
+      }
+      const p = path.join('/tmp', `debate_img_${Date.now()}_${i}.png`);
+      fs.writeFileSync(p, buffer);
+      localPaths.push(p);
+    } catch (e) {
+      console.error(`[debate] Failed to download media ${i + 1}:`, e.message);
+    }
+  }
+  return localPaths;
+}
+
+// Build the "Settle the Debate" branded graphic. Fixed headline + question + up to 2 images.
+async function buildDebateGraphic(question, imagePaths) {
+  const b64 = p => fs.readFileSync(p).toString('base64');
+  const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
+  const logo    = b64(path.join(__dirname, 'tma-logo.png'));
+  const qr      = b64(path.join(__dirname, 'qr.png'));
+  const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const imgTags = imagePaths.slice(0, 2).map(p => {
+    const data = b64(p);
+    const ext = path.extname(p).toLowerCase() === '.jpg' || path.extname(p).toLowerCase() === '.jpeg' ? 'jpeg' : 'png';
+    return `<div class="debate-img"><img src="data:image/${ext};base64,${data}"></div>`;
+  }).join('');
+
+  const html = `<!doctype html><html><head><meta charset="utf-8"><style>
+    ${BASE_CSS}
+    .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;padding-top:6px}
+    .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
+    .debate-images{display:flex;gap:20px;flex:1;min-height:0}
+    .debate-img{flex:1;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25)}
+    .debate-img img{width:100%;height:100%;object-fit:cover;display:block}
+  </style></head><body>
+    <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
+    <div class="wrap">
+      <div class="top">
+        <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
+        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+      </div>
+      <h1>SETTLE THE DEBATE</h1>
+      <div class="debate-wrap">
+        <div class="debate-question">${esc(question)}</div>
+        <div class="debate-images">${imgTags}</div>
+      </div>
+      <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
+    </div>
+  </body></html>`;
+
+  const browser = await puppeteer.launch({
+    executablePath: process.env.PUPPETEER_EXECUTABLE_PATH || undefined,
+    headless: 'new', args: ['--no-sandbox', '--disable-setuid-sandbox'],
+  });
+  try {
+    const page = await browser.newPage();
+    await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
+    await page.setContent(html, { waitUntil: 'networkidle0' });
+    return await page.screenshot({ type: 'png' });
+  } finally { await browser.close(); }
+}
+
+// Post the debate graphic standalone to Twitter (TMA account, no QT)
+async function postDebateGraphicToTwitter(localImagePath) {
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const token = hypefuryToken;
+  const uploaded = await uploadImageVerified(localImagePath, token);
+  if (!uploaded) throw new Error('Failed to upload debate graphic to Aerielab');
+
+  const payload = {
+    currentUserId: TMA_USER_ID_CONST,
+    post: {
+      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
+      slotType: 'post',
+      time: new Date().toISOString(),
+      scheduled: false,
+      user: TMA_USER_ID_CONST,
+      publishingError: null,
+      deleted: false,
+      tweets: [{
+        status: '',
+        count: 0,
+        media: [uploaded],
+        guid: uuidv4(),
+        published: false,
+        quoteTweetData: null,
+        isTrusted: true,
+      }],
+      categories: [],
+      shareOnInstagram: false,
+      linkedIn: null,
+      facebook: null,
+      threads: null,
+    },
+  };
+
+  const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      Origin: 'https://app.aerielab.co',
+      Referer: 'https://app.aerielab.co/queue',
+      'User-Agent': 'Mozilla/5.0',
+    },
+  });
+  return resp.data;
+}
+
+// Schedule the debate graphic to fire 2 days after the original debate post
+function scheduleDebateGraphic(docId, question, imagePaths) {
+  console.log(`[debate] Scheduling graphic for ${docId} in 2 days: "${question.substring(0, 60)}..."`);
+  setTimeout(async () => {
+    try {
+      const graphicBuf = await buildDebateGraphic(question, imagePaths);
+      const tmpPath = path.join('/tmp', `debate_graphic_${Date.now()}.png`);
+      fs.writeFileSync(tmpPath, graphicBuf);
+      try {
+        // Post to Twitter (TMA)
+        await postDebateGraphicToTwitter(tmpPath);
+        console.log(`[debate] Posted graphic to Twitter for ${docId}`);
+        // Post to Facebook (no caption, text baked into graphic)
+        await postToFacebook('', [tmpPath]);
+        console.log(`[debate] Posted graphic to Facebook for ${docId}`);
+      } finally {
+        try { fs.unlinkSync(tmpPath); } catch (e) {}
+      }
+    } catch (e) {
+      console.error(`[debate] Failed to post graphic for ${docId}:`, e.message);
+    } finally {
+      imagePaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
+    }
+  }, DEBATE_DELAY_MS);
+}
+
+// Poll for newly-published "Settle the debate" posts
+async function checkForDebatePosts() {
+  try {
+    const docs = await queryTmaThreadsFirestore(DEBATE_LOOKBACK_MIN, 30);
+    const candidates = docs.filter(d =>
+      d.published !== false // treat unknown as published if it has a tweetId
+      && d.firstTweetStatus
+      && isDebatePost(d.firstTweetStatus)
+      && !processedDebateDocIds.has(d.docId)
+    );
+    if (candidates.length === 0) return;
+    console.log(`[debate] Found ${candidates.length} unprocessed debate post(s)`);
+
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+
+    for (const doc of candidates) {
+      processedDebateDocIds.add(doc.docId);
+      try {
+        const question = extractDebateQuestion(doc.firstTweetStatus);
+        if (!question) {
+          console.log(`[debate] ${doc.docId}: could not extract question — skipping`);
+          continue;
+        }
+        // Fetch full doc to get media field (queryTmaThreadsFirestore only returns summary)
+        const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+        const fullDoc = await getFirestoreDocByRef(`projects/${project}/databases/(default)/documents/threads/${doc.docId}`);
+        const mediaField = fullDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields?.media;
+        const imagePaths = mediaField ? await downloadTweetMediaImages(mediaField, jwt) : [];
+        if (imagePaths.length === 0) {
+          console.log(`[debate] ${doc.docId}: no images found on original post — skipping`);
+          continue;
+        }
+        scheduleDebateGraphic(doc.docId, question, imagePaths);
+      } catch (e) {
+        console.error(`[debate] ${doc.docId} failed:`, e.message);
+      }
+    }
+  } catch (err) {
+    console.error('[debate] Poll cycle failed:', err.message);
+  }
+}
+
+function startDebateGraphicPoller() {
+  console.log(`[debate] Starting poller (every ${DEBATE_POLL_MS / 1000 / 60} min, lookback ${DEBATE_LOOKBACK_MIN / 60 / 24} days, fire delay 2 days)`);
+  setTimeout(() => checkForDebatePosts(), 45000);
+  setInterval(checkForDebatePosts, DEBATE_POLL_MS);
+}
+
 async function checkForRecurringReposts() {
   try {
     const docs = await queryTmaThreadsFirestore(RECURRING_LOOKBACK_MIN, 20);
@@ -4895,4 +5157,6 @@ app.listen(PORT, () => {
   setTimeout(() => resumeWatches(), 12000); // slightly after drips to avoid race
   // Start Aerielab recurring-repost poller (5 min interval)
   startRecurringRepostPoller();
+  // Start "Settle the Debate" graphic poller (15 min interval)
+  startDebateGraphicPoller();
 });
