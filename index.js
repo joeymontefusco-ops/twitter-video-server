@@ -2315,6 +2315,7 @@ async function createWordPressPost(data) {
     content: data.htmlBody,
     status: 'publish',
     categories: [350], // Madden Tips
+    author: 1, // Manu (Joey Montefusco) — display name "Manu"
     featured_media: data.featuredMediaId || 0,
     meta: {
       _yoast_wpseo_title: data.seoTitle || data.title,
@@ -2332,6 +2333,27 @@ async function createWordPressPost(data) {
 }
 
 // Main orchestrator: gather thread data, generate blog, upload images, publish
+// ─── /test-blog-post — manually trigger blog auto-create for a specific driveFileId ──
+app.post('/test-blog-post', async (req, res) => {
+  const { driveFileId, force } = req.body;
+  if (!driveFileId) return res.status(400).json({ error: 'Missing driveFileId' });
+  try {
+    const row = await findSheetRow('driveFileId', driveFileId);
+    if (!row) return res.status(404).json({ error: `No sheet row found for driveFileId ${driveFileId}` });
+    if (force && row.blogPostId) {
+      console.log(`[test-blog-post] force=true, ignoring existing blogPostId=${row.blogPostId}`);
+      row.blogPostId = ''; // bypass dedup check for this test call
+    }
+    const post = await autoCreateBlogPost(driveFileId, row);
+    if (!post) {
+      return res.json({ success: false, message: 'autoCreateBlogPost returned null — check logs (likely dedup skip or missing threadDataJson)' });
+    }
+    res.json({ success: true, post });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 async function autoCreateBlogPost(driveFileId, row) {
   // Dedup: if blogPostId already exists in sheet, skip
   if (row.blogPostId && String(row.blogPostId).trim().length > 0) {
@@ -4849,30 +4871,22 @@ function extractDebateQuestion(text) {
 async function downloadTweetMediaImages(mediaFieldValue, jwtToken) {
   const values = mediaFieldValue?.arrayValue?.values || [];
   const localPaths = [];
+  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
   for (let i = 0; i < values.length; i++) {
     const mediaObj = values[i]?.mapValue?.fields;
-    if (!mediaObj) continue;
-    const url = mediaObj.url?.stringValue || mediaObj.source_url?.stringValue || null;
-    const fileName = mediaObj.name?.stringValue || null;
+    const fileName = mediaObj?.name?.stringValue || null;
+    if (!fileName) continue;
     try {
-      let buffer;
-      if (url) {
-        const r = await axios.get(url, { responseType: 'arraybuffer', timeout: 30000 });
-        buffer = Buffer.from(r.data);
-      } else if (fileName) {
-        const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
-        const encoded = encodeURIComponent(fileName);
-        const fUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
-        const r = await axios.get(fUrl, { responseType: 'arraybuffer', timeout: 30000, headers: { Authorization: `Firebase ${jwtToken}` } });
-        buffer = Buffer.from(r.data);
-      } else {
-        continue;
-      }
-      const p = path.join('/tmp', `debate_img_${Date.now()}_${i}.png`);
-      fs.writeFileSync(p, buffer);
+      const encoded = encodeURIComponent(fileName);
+      const fUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
+      const r = await axios.get(fUrl, { responseType: 'arraybuffer', timeout: 30000, headers: { Authorization: `Firebase ${jwtToken}` } });
+      const ext = path.extname(fileName) || '.png';
+      const p = path.join('/tmp', `debate_img_${Date.now()}_${i}${ext}`);
+      fs.writeFileSync(p, Buffer.from(r.data));
       localPaths.push(p);
+      console.log(`[debate] Downloaded media ${i + 1}/${values.length}: ${fileName}`);
     } catch (e) {
-      console.error(`[debate] Failed to download media ${i + 1}:`, e.message);
+      console.error(`[debate] Failed to download media ${i + 1} (${fileName}):`, e.message);
     }
   }
   return localPaths;
