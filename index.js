@@ -3503,8 +3503,10 @@ app.post('/test-aerielab-history', async (req, res) => {
           ? {
               firstTweetKeys: Object.keys(fields.tweets.arrayValue.values[0].mapValue.fields),
               firstTweetStatusPreview: (fields.tweets.arrayValue.values[0].mapValue.fields.status?.stringValue || '').substring(0, 200),
+              firstTweetMedia: fields.tweets.arrayValue.values[0].mapValue.fields.media || null,
             }
           : null,
+        categories: fields.categories || null,
         // Include any field that might be a recurring reference
         recurrentRelated: Object.entries(fields)
           .filter(([k]) => /recur|repost|parent|source|origin|clone/i.test(k))
