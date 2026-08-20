@@ -3718,20 +3718,23 @@ async function findClosestFormationSlug(page, playbookSlug, guessedFormationSlug
       try {
         const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
         const status = resp ? resp.status() : 0;
+        await new Promise(r => setTimeout(r, 2000)); // let client-side rendering finish
         const domCandidates = await page.evaluate(({ pb, sd }) => {
           const results = new Set();
           const anchors = document.querySelectorAll('a[href]');
-          const pattern = new RegExp(`/playbooks/${pb}/${sd}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?$`);
+          const prefix = `/playbooks/${pb}/${sd}/`;
           for (const a of anchors) {
             const href = a.getAttribute('href') || '';
-            const m = href.match(pattern);
-            if (m) results.add(`${m[1]}-${m[2]}`);
+            const idx = href.indexOf(prefix);
+            if (idx === -1) continue;
+            const rest = href.substring(idx + prefix.length).split('?')[0].split('#')[0].replace(/\/+$/, '');
+            const segments = rest.split('/').filter(Boolean);
+            if (segments.length >= 2) results.add(`${segments[0]}-${segments[1]}`);
           }
           return [...results];
         }, { pb: pbSlug, sd: side });
         debugInfo.attempts.push({ url, status, candidateCount: domCandidates.length, purpose: 'fuzzy-match-source' });
         allCandidates.push(...domCandidates);
-        if (domCandidates.length > 0) break; // this playbook slug variant worked, no need to try defense too if offense had results — actually keep trying both sides
       } catch (e) {
         debugInfo.attempts.push({ url, error: e.message, purpose: 'fuzzy-match-source' });
       }
@@ -3750,6 +3753,8 @@ async function findClosestFormationSlug(page, playbookSlug, guessedFormationSlug
     }
   }
   console.log(`[madden-scrape] Best fuzzy match: "${best}" (score=${bestScore.toFixed(2)}) out of ${allCandidates.length} candidates`);
+  debugInfo.fuzzyMatchCandidateSample = allCandidates.slice(0, 15);
+  debugInfo.fuzzyMatchBest = { best, bestScore };
   return bestScore >= 0.35 ? best : null;
 }
 
