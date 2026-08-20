@@ -1782,6 +1782,113 @@ async function buildFacebookLikeGraphic(thread, opts = {}) {
   } finally { await browser.close(); }
 }
 
+// Performs the actual posting action for a single TMA drip stage. Used by both the
+// real drip chain (executeTmaDripStep) and the manual test endpoint (doesn't advance stage).
+async function performTmaDripStageAction(driveFileId, stage, row) {
+  const quoteTweetData = JSON.parse(row.quoteTweetDataJson || '{}');
+  const clipData = JSON.parse(row.clipUrls || '[]');
+  const rawSectionImages = JSON.parse(row.sectionRawImageUrls || '{}');
+  const title = (quoteTweetData.text || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
+  const uid = TMA_USER_ID_CONST;
+  const handle = '@MaddenAcademy_';
+  console.log(`[tma-drip] Executing stage "${stage}" for ${driveFileId}`);
+
+  // Parse thread structure from cached threadDataJson, but overlay Manu's FINAL edited
+  // tweet text (captured live at publish time) onto each section — cached draft is the
+  // fallback only if live text isn't available.
+  const cachedSections = (JSON.parse(row.threadDataJson || '{}').sections) || [];
+  let liveTweetTexts = [];
+  try { liveTweetTexts = JSON.parse(row.publishedTweetsJson || '[]'); } catch (e) {}
+  const sectionsWithLiveText = cachedSections.map((s, i) => {
+    // Published order: [0]=hook, [1..N]=sections in order, then testimonial + CTA at the end.
+    // Section i (0-indexed) maps to tweetsArr[i+1].
+    const liveText = liveTweetTexts[i + 1];
+    return liveText ? { ...s, content: liveText } : s;
+  });
+  if (liveTweetTexts.length > 0) {
+    console.log(`[tma-drip] Using Manu's final published tweet text for ${sectionsWithLiveText.length} section(s) (from publishedTweetsJson)`);
+  } else {
+    console.log(`[tma-drip] No publishedTweetsJson found — using cached draft content (may not reflect Manu's edits)`);
+  }
+  const threadForRender = {
+    hook: quoteTweetData.text || '',
+    sections: sectionsWithLiveText,
+  };
+
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const jwt = hypefuryToken;
+
+  if (stage.startsWith('tmaClip') && stage !== 'tmaChapter') {
+    const clipIdx = parseInt(stage.replace('tmaClip', '')) - 1;
+    if (clipData[clipIdx]) {
+      const commentText = `${title} Part ${clipIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+      await postClipQuoteTweet(clipData[clipIdx].url, quoteTweetData, commentText, uid);
+    } else {
+      console.log(`[tma-drip] No clip at index ${clipIdx} — skipping ${stage}`);
+    }
+
+  } else if (stage.startsWith('tmaChapter')) {
+    const chapterIdx = parseInt(stage.replace('tmaChapter', '')) - 1;
+    const sections = threadForRender.sections;
+    if (!sections[chapterIdx]) {
+      console.log(`[tma-drip] No section ${chapterIdx + 1} — skipping ${stage} (if applies)`);
+    } else {
+      // Download raw section frame from Firebase
+      const rawFileName = rawSectionImages[chapterIdx + 1] || rawSectionImages[String(chapterIdx + 1)];
+      if (!rawFileName) throw new Error(`No raw section image URL for section ${chapterIdx + 1}`);
+      const localFrame = await downloadFromHfStorage(rawFileName, jwt);
+      try {
+        const cardBuf = await buildFacebookSectionImage(localFrame, sections[chapterIdx], chapterIdx, sections.length, threadForRender);
+        const tmpCard = path.join('/tmp', `tma_chapter_${Date.now()}_${chapterIdx + 1}.png`);
+        fs.writeFileSync(tmpCard, cardBuf);
+        const commentText = `${title} — Chapter ${chapterIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+        try {
+          await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+        } finally {
+          try { fs.unlinkSync(tmpCard); } catch (e) {}
+        }
+      } finally {
+        try { fs.unlinkSync(localFrame); } catch (e) {}
+      }
+    }
+
+  } else if (stage === 'tmaCfbPics') {
+    await postPromoQuoteTweet(row, quoteTweetData, title, uid);
+
+  } else if (stage === 'tmaFullVideo') {
+    const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
+    const commentText = `${title}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+    await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
+
+  } else if (stage === 'tmaSummary') {
+    const cardBuf = await buildFacebookSummaryImage(threadForRender);
+    const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
+    fs.writeFileSync(tmpCard, cardBuf);
+    const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+    try {
+      await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+    } finally {
+      try { fs.unlinkSync(tmpCard); } catch (e) {}
+    }
+
+  } else if (stage === 'tmaLikeGraphic') {
+    const cardBuf = await buildFacebookLikeGraphic(threadForRender);
+    const tmpCard = path.join('/tmp', `tma_like_${Date.now()}.png`);
+    fs.writeFileSync(tmpCard, cardBuf);
+    const commentText = `Like this post ❤️ to unlock the 16 Spaces Playbook — free.\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+    try {
+      await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+    } finally {
+      try { fs.unlinkSync(tmpCard); } catch (e) {}
+    }
+  }
+}
+
+// Test-only wrapper: run a single stage's action without touching sheet dripStage or scheduling next stage
+async function executeTmaDripStageOnly(driveFileId, stage, row) {
+  await performTmaDripStageAction(driveFileId, stage, row);
+}
+
 async function executeTmaDripStep(driveFileId, stage) {
   try {
     const row = await findSheetRow('driveFileId', driveFileId);
@@ -1796,104 +1903,7 @@ async function executeTmaDripStep(driveFileId, stage) {
       return;
     }
 
-    const quoteTweetData = JSON.parse(row.quoteTweetDataJson || '{}');
-    const clipData = JSON.parse(row.clipUrls || '[]');
-    const rawSectionImages = JSON.parse(row.sectionRawImageUrls || '{}');
-    const title = (quoteTweetData.text || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
-    const uid = TMA_USER_ID_CONST;
-    const handle = '@MaddenAcademy_';
-    console.log(`[tma-drip] Executing stage "${stage}" for ${driveFileId}`);
-
-    // Parse thread structure from cached threadDataJson, but overlay Manu's FINAL edited
-    // tweet text (captured live at publish time) onto each section — cached draft is the
-    // fallback only if live text isn't available.
-    const cachedSections = (JSON.parse(row.threadDataJson || '{}').sections) || [];
-    let liveTweetTexts = [];
-    try { liveTweetTexts = JSON.parse(row.publishedTweetsJson || '[]'); } catch (e) {}
-    const sectionsWithLiveText = cachedSections.map((s, i) => {
-      // Published order: [0]=hook, [1..N]=sections in order, then testimonial + CTA at the end.
-      // Section i (0-indexed) maps to tweetsArr[i+1].
-      const liveText = liveTweetTexts[i + 1];
-      return liveText ? { ...s, content: liveText } : s;
-    });
-    if (liveTweetTexts.length > 0) {
-      console.log(`[tma-drip] Using Manu's final published tweet text for ${sectionsWithLiveText.length} section(s) (from publishedTweetsJson)`);
-    } else {
-      console.log(`[tma-drip] No publishedTweetsJson found — using cached draft content (may not reflect Manu's edits)`);
-    }
-    const threadForRender = {
-      hook: quoteTweetData.text || '',
-      sections: sectionsWithLiveText,
-    };
-
-    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
-    const jwt = hypefuryToken;
-
-    if (stage.startsWith('tmaClip') && stage !== 'tmaChapter') {
-      const clipIdx = parseInt(stage.replace('tmaClip', '')) - 1;
-      if (clipData[clipIdx]) {
-        const commentText = `${title} Part ${clipIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-        await postClipQuoteTweet(clipData[clipIdx].url, quoteTweetData, commentText, uid);
-      } else {
-        console.log(`[tma-drip] No clip at index ${clipIdx} — skipping ${stage}`);
-      }
-
-    } else if (stage.startsWith('tmaChapter')) {
-      const chapterIdx = parseInt(stage.replace('tmaChapter', '')) - 1;
-      const sections = threadForRender.sections;
-      if (!sections[chapterIdx]) {
-        console.log(`[tma-drip] No section ${chapterIdx + 1} — skipping ${stage} (if applies)`);
-      } else {
-        // Download raw section frame from Firebase
-        const rawFileName = rawSectionImages[chapterIdx + 1] || rawSectionImages[String(chapterIdx + 1)];
-        if (!rawFileName) throw new Error(`No raw section image URL for section ${chapterIdx + 1}`);
-        const localFrame = await downloadFromHfStorage(rawFileName, jwt);
-        try {
-          const cardBuf = await buildFacebookSectionImage(localFrame, sections[chapterIdx], chapterIdx, sections.length, threadForRender);
-          const tmpCard = path.join('/tmp', `tma_chapter_${Date.now()}_${chapterIdx + 1}.png`);
-          fs.writeFileSync(tmpCard, cardBuf);
-          const commentText = `${title} — Chapter ${chapterIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-          try {
-            await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
-          } finally {
-            try { fs.unlinkSync(tmpCard); } catch (e) {}
-          }
-        } finally {
-          try { fs.unlinkSync(localFrame); } catch (e) {}
-        }
-      }
-
-    } else if (stage === 'tmaCfbPics') {
-      // Re-post the 4 cfb.fan hook images as a QT (same as promo QT with TMA account)
-      await postPromoQuoteTweet(row, quoteTweetData, title, uid);
-
-    } else if (stage === 'tmaFullVideo') {
-      const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
-      const commentText = `${title}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-      await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
-
-    } else if (stage === 'tmaSummary') {
-      const cardBuf = await buildFacebookSummaryImage(threadForRender);
-      const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
-      fs.writeFileSync(tmpCard, cardBuf);
-      const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-      try {
-        await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
-      } finally {
-        try { fs.unlinkSync(tmpCard); } catch (e) {}
-      }
-
-    } else if (stage === 'tmaLikeGraphic') {
-      const cardBuf = await buildFacebookLikeGraphic(threadForRender);
-      const tmpCard = path.join('/tmp', `tma_like_${Date.now()}.png`);
-      fs.writeFileSync(tmpCard, cardBuf);
-      const commentText = `Like this post ❤️ to unlock the 16 Spaces Playbook — free.\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-      try {
-        await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
-      } finally {
-        try { fs.unlinkSync(tmpCard); } catch (e) {}
-      }
-    }
+    await performTmaDripStageAction(driveFileId, stage, row);
 
     const next = nextTmaStage(stage);
     if (next && next !== 'done') {
@@ -2358,6 +2368,27 @@ async function createWordPressPost(data) {
 
 // Main orchestrator: gather thread data, generate blog, upload images, publish
 // ─── /test-blog-post — manually trigger blog auto-create for a specific driveFileId ──
+// ─── /test-tma-drip-stage — manually fire any TMA drip stage immediately for testing ──
+app.post('/test-tma-drip-stage', async (req, res) => {
+  const { driveFileId, stage } = req.body;
+  if (!driveFileId || !stage) return res.status(400).json({ error: 'Missing driveFileId or stage' });
+  const validStages = ['tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2', 'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4', 'tmaFullVideo', 'tmaSummary', 'tmaLikeGraphic'];
+  if (!validStages.includes(stage)) {
+    return res.status(400).json({ error: `Invalid stage. Must be one of: ${validStages.join(', ')}` });
+  }
+  try {
+    const row = await findSheetRow('driveFileId', driveFileId);
+    if (!row) return res.status(404).json({ error: `No sheet row found for driveFileId ${driveFileId}` });
+    console.log(`[test-tma-drip-stage] Manually firing stage "${stage}" for ${driveFileId}`);
+    // Run the stage logic directly WITHOUT advancing to the next stage or touching sheet dripStage
+    // (executeTmaDripStep normally does both — for testing we just want to see if THIS stage works)
+    await executeTmaDripStageOnly(driveFileId, stage, row);
+    res.json({ success: true, message: `Stage "${stage}" executed — check Railway logs for [graphic-qt] or [tma-drip] output, and check TMA's Twitter for the actual post` });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/test-blog-post', async (req, res) => {
   const { driveFileId, force } = req.body;
   if (!driveFileId) return res.status(400).json({ error: 'Missing driveFileId' });
