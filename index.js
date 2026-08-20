@@ -3682,6 +3682,66 @@ app.post('/test-madden-scrape', async (req, res) => {
 });
 
 // ─── Scrape madden-school.com for play images (SPA — requires headless browser) ──
+// Simple string similarity: token-overlap score (0-1). Good enough for formation-name fuzzy matching.
+function tokenSimilarity(a, b) {
+  const tokensA = new Set(String(a).split('-').filter(Boolean));
+  const tokensB = new Set(String(b).split('-').filter(Boolean));
+  if (tokensA.size === 0 || tokensB.size === 0) return 0;
+  let overlap = 0;
+  for (const t of tokensA) if (tokensB.has(t)) overlap++;
+  // Also give partial credit for tokens that are substrings of each other (handles "y" vs "yf", "off" vs "of")
+  let partial = 0;
+  for (const ta of tokensA) {
+    for (const tb of tokensB) {
+      if (ta !== tb && ta.length >= 2 && tb.length >= 2 && (ta.includes(tb) || tb.includes(ta))) partial += 0.5;
+    }
+  }
+  const union = new Set([...tokensA, ...tokensB]).size;
+  return (overlap + partial) / union;
+}
+
+// Fetch the playbook's formation list (offense + defense) and return the slug most similar
+// to the guessed formation slug. Returns null if nothing scores above a minimal threshold.
+async function findClosestFormationSlug(page, playbookSlug, guessedFormationSlug, debugInfo) {
+  const sides = ['offense', 'defense'];
+  const allCandidates = [];
+  for (const side of sides) {
+    const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
+    try {
+      const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+      const status = resp ? resp.status() : 0;
+      const domCandidates = await page.evaluate(({ pb, sd }) => {
+        const results = new Set();
+        const anchors = document.querySelectorAll('a[href]');
+        const pattern = new RegExp(`/playbooks/${pb}/${sd}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?$`);
+        for (const a of anchors) {
+          const href = a.getAttribute('href') || '';
+          const m = href.match(pattern);
+          if (m) results.add(`${m[1]}-${m[2]}`);
+        }
+        return [...results];
+      }, { pb: playbookSlug, sd: side });
+      debugInfo.attempts.push({ url, status, candidateCount: domCandidates.length, purpose: 'fuzzy-match-source' });
+      allCandidates.push(...domCandidates);
+    } catch (e) {
+      debugInfo.attempts.push({ url, error: e.message, purpose: 'fuzzy-match-source' });
+    }
+  }
+  if (allCandidates.length === 0) return null;
+
+  let best = null;
+  let bestScore = 0;
+  for (const candidate of allCandidates) {
+    const score = tokenSimilarity(guessedFormationSlug, candidate);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+    }
+  }
+  console.log(`[madden-scrape] Best fuzzy match: "${best}" (score=${bestScore.toFixed(2)}) out of ${allCandidates.length} candidates`);
+  return bestScore >= 0.35 ? best : null;
+}
+
 async function scrapeMaddenSchool(playbookName, formationName) {
   let stealthPuppeteer;
   try {
@@ -3741,20 +3801,58 @@ async function scrapeMaddenSchool(playbookName, formationName) {
       }
     }
 
+    // Fallback: direct slug guess failed. Fetch the playbook's real formation list and
+    // fuzzy-match against what we were given (handles typos/abbreviations like
+    // "Double Flex YF Close" → "Gun Doubles Flex Y Off Close").
+    let resolvedFormationSlug = formationSlug;
+    let resolvedUnderscoreSlug = underscoreSlug;
+    if (!html) {
+      console.log(`[madden-scrape] Direct slug "${formationSlug}" failed — trying fuzzy match against real playbook formations`);
+      const playbookSlug = slugify(playbookName);
+      const fuzzyMatch = await findClosestFormationSlug(page, playbookSlug, formationSlug, debugInfo);
+      if (fuzzyMatch) {
+        console.log(`[madden-scrape] Fuzzy match found: "${fuzzyMatch}" (score-best guess)`);
+        resolvedFormationSlug = fuzzyMatch;
+        const fDash = fuzzyMatch.indexOf('-');
+        resolvedUnderscoreSlug = fDash > 0 ? fuzzyMatch.substring(0, fDash) + '_' + fuzzyMatch.substring(fDash + 1) : fuzzyMatch;
+        // Retry seed plays with the corrected slug
+        for (const seed of seedPlays) {
+          const url = `https://www.madden-school.com/plays/${resolvedFormationSlug}/${seed}/`;
+          try {
+            const resp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
+            const status = resp ? resp.status() : 0;
+            await new Promise(r => setTimeout(r, 2500));
+            const currentHtml = await page.content();
+            debugInfo.attempts.push({ url, status, htmlLength: currentHtml.length, fuzzyRetry: true });
+            if (status === 200 && currentHtml.length > 20000 && currentHtml.includes('playbook_images_madden-27')) {
+              html = currentHtml;
+              sourceUrl = url;
+              console.log(`[madden-scrape] Loaded seed play after fuzzy match: ${url} (${currentHtml.length} bytes)`);
+              break;
+            }
+          } catch (e) {
+            debugInfo.attempts.push({ url, error: e.message, fuzzyRetry: true });
+          }
+        }
+      } else {
+        console.log(`[madden-scrape] Fuzzy match found no candidates for "${formationName}" in playbook "${playbookName}"`);
+      }
+    }
+
     if (!html) {
       const err = new Error(`Could not load any seed play for formation "${formationName}" (slug=${formationSlug})`);
       err.debug = debugInfo;
       throw err;
     }
 
-    const linkRegex = new RegExp(`/plays/${formationSlug}/([a-z0-9\\-]+)/?["']`, 'gi');
+    const linkRegex = new RegExp(`/plays/${resolvedFormationSlug}/([a-z0-9\\-]+)/?["']`, 'gi');
     const playSlugs = [...new Set([...html.matchAll(linkRegex)].map(m => m[1]))];
 
     const imageUrls = playSlugs.map(slug =>
-      `https://www.madden-school.com/wp-content/plugins/playbook/playbook_images_madden-27/${underscoreSlug}_${slug}.png`
+      `https://www.madden-school.com/wp-content/plugins/playbook/playbook_images_madden-27/${resolvedUnderscoreSlug}_${slug}.png`
     );
 
-    console.log(`[madden-scrape] Found ${playSlugs.length} plays in formation ${formationSlug}`);
+    console.log(`[madden-scrape] Found ${playSlugs.length} plays in formation ${resolvedFormationSlug}`);
 
     // Download top N images inside the browser session (Cloudflare cookies attached)
     const topN = 4;
