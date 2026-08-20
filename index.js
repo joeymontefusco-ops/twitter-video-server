@@ -2546,6 +2546,7 @@ async function resumeDrips() {
   try {
     const rows = await readSheet();
     const now = Date.now();
+    const STALE_GRACE_MS = 15 * 60 * 1000; // allow up to 15 min overdue (normal restart delay), beyond that = skip
 
     for (const row of rows) {
       // Manu chain
@@ -2554,9 +2555,14 @@ async function resumeDrips() {
         const nextStageVal = currentIdx >= 0 ? DRIP_ORDER[currentIdx + 1] : null;
         if (nextStageVal && nextStageVal !== 'done') {
           const nextTime = row.nextDripAt ? Date.parse(row.nextDripAt) : 0;
-          const delay = Math.max(nextTime - now, 5000);
-          console.log(`[drip-recovery] Resuming ${row.driveFileId} at stage "${nextStageVal}" in ${Math.round(delay / 60000)} min`);
-          scheduleDripStep(row.driveFileId, nextStageVal, delay);
+          const overdueBy = now - nextTime;
+          if (overdueBy > STALE_GRACE_MS) {
+            console.log(`[drip-recovery] SKIPPING ${row.driveFileId} stage "${nextStageVal}" — overdue by ${Math.round(overdueBy / 60000)} min (stale, not auto-resuming)`);
+          } else {
+            const delay = Math.max(nextTime - now, 5000);
+            console.log(`[drip-recovery] Resuming ${row.driveFileId} at stage "${nextStageVal}" in ${Math.round(delay / 60000)} min`);
+            scheduleDripStep(row.driveFileId, nextStageVal, delay);
+          }
         }
       }
 
@@ -2566,9 +2572,14 @@ async function resumeDrips() {
         const nextTmaVal = tmaIdx >= 0 ? TMA_DRIP_ORDER[tmaIdx + 1] : null;
         if (nextTmaVal && nextTmaVal !== 'done') {
           const nextTime = row.tmaNextDripAt ? Date.parse(row.tmaNextDripAt) : 0;
-          const delay = Math.max(nextTime - now, 5000);
-          console.log(`[tma-drip-recovery] Resuming ${row.driveFileId} at stage "${nextTmaVal}" in ${Math.round(delay / 60000)} min`);
-          scheduleTmaDripStep(row.driveFileId, nextTmaVal, delay);
+          const overdueBy = now - nextTime;
+          if (overdueBy > STALE_GRACE_MS) {
+            console.log(`[tma-drip-recovery] SKIPPING ${row.driveFileId} stage "${nextTmaVal}" — overdue by ${Math.round(overdueBy / 60000)} min (stale, not auto-resuming)`);
+          } else {
+            const delay = Math.max(nextTime - now, 5000);
+            console.log(`[tma-drip-recovery] Resuming ${row.driveFileId} at stage "${nextTmaVal}" in ${Math.round(delay / 60000)} min`);
+            scheduleTmaDripStep(row.driveFileId, nextTmaVal, delay);
+          }
         }
       }
     }
@@ -3759,20 +3770,23 @@ async function findClosestFormationSlug(page, playbookSlug, guessedFormationSlug
         const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
         const status = resp ? resp.status() : 0;
         await new Promise(r => setTimeout(r, 2000)); // let client-side rendering finish
-        const domCandidates = await page.evaluate(({ pb, sd }) => {
+        const domCandidates = await page.evaluate(({ pb }) => {
           const results = new Set();
           const anchors = document.querySelectorAll('a[href]');
-          const prefix = `/playbooks/${pb}/${sd}/`;
+          // Real URL pattern: /formations/{formation-slug}/{playbook-slug}/
+          const prefix = '/formations/';
+          const suffix = `/${pb}/`;
           for (const a of anchors) {
             const href = a.getAttribute('href') || '';
             const idx = href.indexOf(prefix);
             if (idx === -1) continue;
-            const rest = href.substring(idx + prefix.length).split('?')[0].split('#')[0].replace(/\/+$/, '');
-            const segments = rest.split('/').filter(Boolean);
-            if (segments.length >= 2) results.add(`${segments[0]}-${segments[1]}`);
+            const rest = href.substring(idx + prefix.length).split('?')[0].split('#')[0];
+            if (!rest.endsWith(suffix) && !rest.endsWith(suffix.slice(0, -1))) continue;
+            const formationSlugPart = rest.split('/')[0];
+            if (formationSlugPart) results.add(formationSlugPart);
           }
           return [...results];
-        }, { pb: pbSlug, sd: side });
+        }, { pb: pbSlug });
         debugInfo.attempts.push({ url, status, candidateCount: domCandidates.length, purpose: 'fuzzy-match-source' });
         allCandidates.push(...domCandidates);
       } catch (e) {
