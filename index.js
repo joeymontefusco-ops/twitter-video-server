@@ -3640,6 +3640,33 @@ app.post('/test-madden-image', async (req, res) => {
 });
 
 // ─── /test-madden-scrape — scrape madden-school.com play images ──────────
+// ─── /test-hook-resolve — test full resolvePlaybookFormation + scrape pipeline on a raw hook ──
+app.post('/test-hook-resolve', async (req, res) => {
+  const { hook, playbook, formation } = req.body;
+  if (!hook) return res.status(400).json({ error: 'Missing hook' });
+  try {
+    const thread = { hook, playbook: playbook || null, formation: formation || null };
+    const resolved = await resolvePlaybookFormation(thread);
+    if (!resolved) {
+      return res.json({ success: false, resolved: null, message: 'Could not resolve playbook/formation from hook' });
+    }
+    try {
+      const scrape = await scrapeMaddenSchool(resolved.playbookName, resolved.formationName);
+      res.json({
+        success: true,
+        resolved,
+        scrapeSuccess: true,
+        imageCount: scrape.totalImagesFound,
+        sampleImageUrls: (scrape.imageUrls || []).slice(0, 4),
+      });
+    } catch (scrapeErr) {
+      res.json({ success: true, resolved, scrapeSuccess: false, scrapeError: scrapeErr.message });
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/test-madden-scrape', async (req, res) => {
   const { playbook, formation } = req.body;
   if (!playbook || !formation) {
