@@ -1635,32 +1635,14 @@ async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText
   if (!uploaded) throw new Error('Failed to upload graphic to Aerielab');
   console.log(`[graphic-qt] Image uploaded to Firebase OK, now saving post to Aerielab queue...`);
 
-  const payload = {
-    currentUserId: userId,
-    post: {
-      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
-      slotType: 'post',
-      time: new Date().toISOString(),
-      scheduled: false,
-      user: userId,
-      publishingError: null,
-      deleted: false,
-      tweets: [{
-        status: commentText,
-        count: 0,
-        media: [uploaded],
-        guid: uuidv4(),
-        published: false,
-        quoteTweetData,
-        isTrusted: true,
-      }],
-      categories: [],
-      shareOnInstagram: false,
-      linkedIn: null,
-      facebook: null,
-      threads: null,
-    },
-  };
+  const payload = buildFullAerielabPostPayload(userId, [{
+    status: commentText,
+    count: 0,
+    media: [uploaded],
+    guid: uuidv4(),
+    published: false,
+    quoteTweetData,
+  }]);
 
   try {
     const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
@@ -5015,11 +4997,10 @@ async function findSheetRowByHookText(text) {
 }
 
 // Post a multi-image quote tweet from TMA account
-async function postImagesAsQuoteTweet(mediaArray, quoteTweetData, commentText, userId) {
-  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
-  const token = hypefuryToken;
-
-  const payload = {
+// Build the FULL Aerielab post payload (all fields their backend expects — a partial
+// object causes a 500 "error creating post"). Use for any single-tweet QT/post.
+function buildFullAerielabPostPayload(userId, tweets, opts = {}) {
+  return {
     currentUserId: userId,
     post: {
       midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
@@ -5029,22 +5010,72 @@ async function postImagesAsQuoteTweet(mediaArray, quoteTweetData, commentText, u
       user: userId,
       publishingError: null,
       deleted: false,
-      tweets: [{
-        status: commentText,
-        count: 0,
-        media: mediaArray,
-        guid: uuidv4(),
-        published: false,
-        quoteTweetData,
-        isTrusted: true,
-      }],
-      categories: [],
+      tweets,
+      lastAutoRTTime: null,
+      isFavorite: false,
+      type: 'post',
+      tweetIds: null,
+      conditionalRetweetsConditions: { delayForRetweet: '1 hour', minRetweetsThreshold: null, minFavoritesThreshold: 5 },
+      autoplug: { processed: false, minRetweets: null, minFavorites: 0, templateName: null, status: '' },
+      postNow: true,
+      source: null,
+      writer: null,
+      growthProgram: null,
+      tweetshot: null,
       shareOnInstagram: false,
       linkedIn: null,
       facebook: null,
+      delayBetweenTweets: null,
+      tweetMetricsUpdatedAt: null,
+      categories: [],
+      recurrentPostRef: null,
+      replyToTweetId: null,
+      replyToTweetInfo: null,
+      isCancelled: false,
+      tweetsCount: tweets.length,
+      isCloned: false,
+      isRecurrentPost: false,
+      timerData: null,
+      isPinned: false,
+      ghostwritingRefusal: null,
+      ghostwritingStatus: null,
+      impressionsCountOfTheFirstTweet: null,
+      tweetshotContent: null,
+      instagramPublishingError: null,
+      facebookPublishingError: null,
+      publishedToInstagram: false,
+      autoDM: null,
+      hasThreadFinisherTweet: false,
+      created_at: null,
+      linkedInPublishingError: null,
+      isRecurrentPostDisabled: false,
+      instagramThreadFinisherText: null,
+      lastClonePostedTime: null,
+      isDeletedFromTwitter: false,
+      isLongTweetshot: true,
+      isLargeFontTweetshot: false,
+      tweetReel: null,
+      tiktok: null,
+      ama: null,
+      youtubeShortRef: null,
       threads: null,
+      tiktokPublishingError: null,
     },
   };
+}
+
+async function postImagesAsQuoteTweet(mediaArray, quoteTweetData, commentText, userId) {
+  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+  const token = hypefuryToken;
+
+  const payload = buildFullAerielabPostPayload(userId, [{
+    status: commentText,
+    count: 0,
+    media: mediaArray,
+    guid: uuidv4(),
+    published: false,
+    quoteTweetData,
+  }]);
 
   const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
     headers: {
@@ -5054,6 +5085,7 @@ async function postImagesAsQuoteTweet(mediaArray, quoteTweetData, commentText, u
       Referer: 'https://app.aerielab.co/queue',
       'User-Agent': 'Mozilla/5.0',
     },
+    timeout: 30000,
   });
   return resp.data;
 }
@@ -5167,32 +5199,14 @@ async function postDebateGraphicToTwitter(localImagePath) {
   const uploaded = await uploadImageVerified(localImagePath, token);
   if (!uploaded) throw new Error('Failed to upload debate graphic to Aerielab');
 
-  const payload = {
-    currentUserId: TMA_USER_ID_CONST,
-    post: {
-      midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
-      slotType: 'post',
-      time: new Date().toISOString(),
-      scheduled: false,
-      user: TMA_USER_ID_CONST,
-      publishingError: null,
-      deleted: false,
-      tweets: [{
-        status: '',
-        count: 0,
-        media: [uploaded],
-        guid: uuidv4(),
-        published: false,
-        quoteTweetData: null,
-        isTrusted: true,
-      }],
-      categories: [],
-      shareOnInstagram: false,
-      linkedIn: null,
-      facebook: null,
-      threads: null,
-    },
-  };
+  const payload = buildFullAerielabPostPayload(TMA_USER_ID_CONST, [{
+    status: '',
+    count: 0,
+    media: [uploaded],
+    guid: uuidv4(),
+    published: false,
+    quoteTweetData: null,
+  }]);
 
   const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
     headers: {
@@ -5202,6 +5216,7 @@ async function postDebateGraphicToTwitter(localImagePath) {
       Referer: 'https://app.aerielab.co/queue',
       'User-Agent': 'Mozilla/5.0',
     },
+    timeout: 30000,
   });
   return resp.data;
 }
