@@ -918,6 +918,7 @@ Return JSON only (no markdown fence):
       console.log(`[hook-parse] LLM extracted: playbook="${parsed.playbook}", formation="${parsed.formation}"`);
       return { playbookName: parsed.playbook, formationName: parsed.formation };
     }
+    console.log(`[hook-parse] LLM returned no playbook/formation (playbook=${JSON.stringify(parsed.playbook)}, formation=${JSON.stringify(parsed.formation)}) — hook may genuinely lack this info`);
     return null;
   } catch (e) {
     console.error('[hook-parse] LLM extraction failed:', e.message);
@@ -934,11 +935,16 @@ async function resolvePlaybookFormation(thread) {
     console.log(`[hook-parse] Using explicit fields: playbook="${thread.playbook}", formation="${thread.formation}"`);
     return { playbookName: String(thread.playbook).trim(), formationName: String(thread.formation).trim() };
   }
+  console.log(`[hook-parse] No explicit playbook/formation fields on thread (playbook=${JSON.stringify(thread?.playbook)}, formation=${JSON.stringify(thread?.formation)}) — trying LLM extraction from hook: "${String(thread?.hook || '').split('\n')[0]}"`);
   const llmResult = await extractPlaybookFormationViaLLM((thread && thread.hook) || '');
   if (llmResult) return llmResult;
   // Last-resort regex
   const regexResult = parseHookForPlaybookFormation((thread && thread.hook) || '');
-  if (regexResult) console.log(`[hook-parse] Regex fallback matched: playbook="${regexResult.playbookName}", formation="${regexResult.formationName}"`);
+  if (regexResult) {
+    console.log(`[hook-parse] Regex fallback matched: playbook="${regexResult.playbookName}", formation="${regexResult.formationName}"`);
+  } else {
+    console.log(`[hook-parse] Regex fallback also found nothing — giving up`);
+  }
   return regexResult;
 }
 
@@ -1620,6 +1626,7 @@ async function downloadFromHfStorage(fileName, jwtToken) {
 async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText, userId) {
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
+  console.log(`[graphic-qt] Uploading graphic ${path.basename(localImagePath)} for user ${userId}, QT tweetId=${quoteTweetData?.tweetId || 'none'}`);
   const uploaded = await uploadImageVerified(localImagePath, token);
   if (!uploaded) throw new Error('Failed to upload graphic to Aerielab');
 
@@ -1659,6 +1666,7 @@ async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText
       'User-Agent': 'Mozilla/5.0',
     },
   });
+  console.log(`[graphic-qt] ✅ Graphic QT saved to Aerielab queue: postId=${resp.data?.postId || JSON.stringify(resp.data).substring(0, 100)}`);
   return resp.data;
 }
 
@@ -1796,10 +1804,26 @@ async function executeTmaDripStep(driveFileId, stage) {
     const handle = '@MaddenAcademy_';
     console.log(`[tma-drip] Executing stage "${stage}" for ${driveFileId}`);
 
-    // Parse thread structure from quoteTweetData if needed for graphics
+    // Parse thread structure from cached threadDataJson, but overlay Manu's FINAL edited
+    // tweet text (captured live at publish time) onto each section — cached draft is the
+    // fallback only if live text isn't available.
+    const cachedSections = (JSON.parse(row.threadDataJson || '{}').sections) || [];
+    let liveTweetTexts = [];
+    try { liveTweetTexts = JSON.parse(row.publishedTweetsJson || '[]'); } catch (e) {}
+    const sectionsWithLiveText = cachedSections.map((s, i) => {
+      // Published order: [0]=hook, [1..N]=sections in order, then testimonial + CTA at the end.
+      // Section i (0-indexed) maps to tweetsArr[i+1].
+      const liveText = liveTweetTexts[i + 1];
+      return liveText ? { ...s, content: liveText } : s;
+    });
+    if (liveTweetTexts.length > 0) {
+      console.log(`[tma-drip] Using Manu's final published tweet text for ${sectionsWithLiveText.length} section(s) (from publishedTweetsJson)`);
+    } else {
+      console.log(`[tma-drip] No publishedTweetsJson found — using cached draft content (may not reflect Manu's edits)`);
+    }
     const threadForRender = {
       hook: quoteTweetData.text || '',
-      sections: (JSON.parse(row.threadDataJson || '{}').sections) || [],
+      sections: sectionsWithLiveText,
     };
 
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
@@ -3907,6 +3931,8 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
 
             const tweetsArr = r.data?.fields?.tweets?.arrayValue?.values || [];
             const firstTweetText = tweetsArr[0]?.mapValue?.fields?.status?.stringValue || '';
+            // Save ALL tweet texts (Manu's final edited/approved versions) for later graphic generation
+            const allTweetTexts = tweetsArr.map(t => t?.mapValue?.fields?.status?.stringValue || '');
 
             const quoteTweetData = {
               text: firstTweetText,
@@ -3922,6 +3948,7 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
               await updateSheetRow(row._rowIndex, {
                 threadPublished: 'true',
                 quoteTweetDataJson: JSON.stringify(quoteTweetData),
+                publishedTweetsJson: JSON.stringify(allTweetTexts),
               });
               console.log(`[watch] Sheet updated for ${driveFileId}`);
 
