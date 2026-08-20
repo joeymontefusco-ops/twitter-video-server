@@ -3705,27 +3705,38 @@ function tokenSimilarity(a, b) {
 async function findClosestFormationSlug(page, playbookSlug, guessedFormationSlug, debugInfo) {
   const sides = ['offense', 'defense'];
   const allCandidates = [];
-  for (const side of sides) {
-    const url = `https://www.madden-school.com/playbooks/${playbookSlug}/${side}/`;
-    try {
-      const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
-      const status = resp ? resp.status() : 0;
-      const domCandidates = await page.evaluate(({ pb, sd }) => {
-        const results = new Set();
-        const anchors = document.querySelectorAll('a[href]');
-        const pattern = new RegExp(`/playbooks/${pb}/${sd}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?$`);
-        for (const a of anchors) {
-          const href = a.getAttribute('href') || '';
-          const m = href.match(pattern);
-          if (m) results.add(`${m[1]}-${m[2]}`);
-        }
-        return [...results];
-      }, { pb: playbookSlug, sd: side });
-      debugInfo.attempts.push({ url, status, candidateCount: domCandidates.length, purpose: 'fuzzy-match-source' });
-      allCandidates.push(...domCandidates);
-    } catch (e) {
-      debugInfo.attempts.push({ url, error: e.message, purpose: 'fuzzy-match-source' });
+  // NFL playbook slugs on madden-school are usually just the team nickname
+  // (e.g. "saints", "49ers"), not the full city+nickname name we might have.
+  // Try the full slug first, then fall back to just the last word.
+  const slugParts = playbookSlug.split('-').filter(Boolean);
+  const lastWordSlug = slugParts.length > 1 ? slugParts[slugParts.length - 1] : null;
+  const playbookSlugCandidates = [...new Set([playbookSlug, lastWordSlug].filter(Boolean))];
+
+  for (const pbSlug of playbookSlugCandidates) {
+    for (const side of sides) {
+      const url = `https://www.madden-school.com/playbooks/${pbSlug}/${side}/`;
+      try {
+        const resp = await page.goto(url, { waitUntil: 'networkidle0', timeout: 30000 });
+        const status = resp ? resp.status() : 0;
+        const domCandidates = await page.evaluate(({ pb, sd }) => {
+          const results = new Set();
+          const anchors = document.querySelectorAll('a[href]');
+          const pattern = new RegExp(`/playbooks/${pb}/${sd}/([a-z0-9\\-]+)/([a-z0-9\\-]+)/?$`);
+          for (const a of anchors) {
+            const href = a.getAttribute('href') || '';
+            const m = href.match(pattern);
+            if (m) results.add(`${m[1]}-${m[2]}`);
+          }
+          return [...results];
+        }, { pb: pbSlug, sd: side });
+        debugInfo.attempts.push({ url, status, candidateCount: domCandidates.length, purpose: 'fuzzy-match-source' });
+        allCandidates.push(...domCandidates);
+        if (domCandidates.length > 0) break; // this playbook slug variant worked, no need to try defense too if offense had results — actually keep trying both sides
+      } catch (e) {
+        debugInfo.attempts.push({ url, error: e.message, purpose: 'fuzzy-match-source' });
+      }
     }
+    if (allCandidates.length > 0) break; // this playbook slug variant produced candidates, stop trying other variants
   }
   if (allCandidates.length === 0) return null;
 
