@@ -770,19 +770,19 @@ const BASE_CSS = `
   .brand img{width:74px;height:74px}
   .brand span{font-weight:700;font-size:30px;line-height:1.05}
   .pill{background:#fff;border-radius:12px;padding:12px 22px;font-weight:800;font-size:30px}
-  .pill .m{color:var(--accent)}.pill .o{color:#0a0a0a}
+  .pill .m{color:var(--accent, #2e7bd6)}.pill .o{color:#0a0a0a}
   h1{font-weight:800;font-size:40px;line-height:1.15;text-align:center;text-transform:uppercase;margin-bottom:22px}
-  .panel{background:var(--panel);border-radius:22px;padding:26px 28px}
+  .panel{background:var(--panel, rgba(10,30,64,0.78));border-radius:22px;padding:26px 28px}
   .panel h2{font-size:30px;font-weight:800;margin-bottom:14px}
   .kv{font-size:26px;line-height:1.5}.kv b{font-weight:800}
   ul{list-style:none;display:flex;flex-direction:column;gap:16px}
   li{position:relative;padding-left:26px;font-size:25px;line-height:1.35}
-  li::before{content:'•';position:absolute;left:4px;top:-1px;color:var(--accent)}
+  li::before{content:'•';position:absolute;left:4px;top:-1px;color:var(--accent, #2e7bd6)}
   .boxes{display:flex;gap:16px}
   .label{background:#0a0a0a;border-radius:10px;padding:16px 22px;font-size:32px;font-weight:800;text-align:center;flex:1;display:flex;align-items:center;justify-content:center}
   .art{border-radius:14px;overflow:hidden}.art img{width:100%;height:100%;object-fit:cover;display:block}
   .foot{display:flex;justify-content:space-between;align-items:flex-end;margin-top:auto;padding-top:20px}
-  .url{font-size:44px;font-weight:800;text-decoration:underline;text-decoration-color:var(--accent)}
+  .url{font-size:44px;font-weight:800;text-decoration:underline;text-decoration-color:var(--accent, #2e7bd6)}
   .qr{width:120px;height:120px;background:#fff;padding:6px;border-radius:6px}.qr img{width:100%;height:100%}
 `;
 
@@ -867,7 +867,7 @@ async function buildFacebookSectionImage(rawFramePath, sectionData, sectionIndex
     <div class="wrap">
       <div class="top">
         <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
-        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+        <div class="pill" style="white-space:nowrap"><span class="m" style="color:#2e7bd6">MENTAL</span> <span class="o" style="color:#0a0a0a">OVER META</span></div>
       </div>
       ${view.body}
       <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
@@ -1683,8 +1683,15 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
   const headline = segs.length >= 2 ? segs.slice(0, -1).join(' — ').trim() : rawHook;
 
   const sectionSummaries = (thread.sections || []).map((s, i) => {
-    const firstLine = (s.content || '').split('\n').map(l => l.trim().replace(/^♟️\s*/, '').trim()).find(Boolean) || `Section ${i + 1}`;
-    return `<li><b>${i + 1}.</b> ${esc(firstLine)}</li>`;
+    const lines = (s.content || '').split('\n').map(l => l.trim()).filter(Boolean);
+    // Prefer the first actual bullet point (♟️ marker = real content), not the header line
+    const bulletLine = lines.find(l => l.startsWith('♟️'));
+    const cleanBullet = bulletLine ? bulletLine.replace(/^♟️\s*/, '').trim() : null;
+    // Fallback: if no bullet found, use the header (strip its numbered emoji) as before
+    const headerLine = lines[0] ? lines[0].replace(/^[0-9]️⃣\s*/, '').trim() : null;
+    const summaryText = cleanBullet || headerLine || `Section ${i + 1}`;
+    const truncated = summaryText.length > 90 ? summaryText.substring(0, 87).trim() + '…' : summaryText;
+    return `<li><b>${i + 1}.</b> ${esc(truncated)}</li>`;
   }).join('');
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
@@ -1702,7 +1709,7 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
     <div class="wrap">
       <div class="top">
         <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
-        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+        <div class="pill" style="white-space:nowrap"><span class="m" style="color:#2e7bd6">MENTAL</span> <span class="o" style="color:#0a0a0a">OVER META</span></div>
       </div>
       <h1>${esc(headline)}</h1>
       <div class="recap">
@@ -1755,7 +1762,7 @@ async function buildFacebookLikeGraphic(thread, opts = {}) {
     <div class="wrap">
       <div class="top">
         <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
-        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+        <div class="pill" style="white-space:nowrap"><span class="m" style="color:#2e7bd6">MENTAL</span> <span class="o" style="color:#0a0a0a">OVER META</span></div>
       </div>
       <div class="like-wrap">
         <div class="like-heart">❤️</div>
@@ -5169,7 +5176,7 @@ async function buildDebateGraphic(question, imagePaths) {
     <div class="wrap">
       <div class="top">
         <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
-        <div class="pill"><span class="m">MENTAL</span> <span class="o">OVER META</span></div>
+        <div class="pill" style="white-space:nowrap"><span class="m" style="color:#2e7bd6">MENTAL</span> <span class="o" style="color:#0a0a0a">OVER META</span></div>
       </div>
       <h1>SETTLE THE DEBATE</h1>
       <div class="debate-wrap">
