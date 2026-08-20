@@ -3660,7 +3660,7 @@ app.post('/test-hook-resolve', async (req, res) => {
         sampleImageUrls: (scrape.imageUrls || []).slice(0, 4),
       });
     } catch (scrapeErr) {
-      res.json({ success: true, resolved, scrapeSuccess: false, scrapeError: scrapeErr.message });
+      res.json({ success: true, resolved, scrapeSuccess: false, scrapeError: scrapeErr.message, debug: scrapeErr.debug || null });
     }
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
