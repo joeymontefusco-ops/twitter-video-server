@@ -651,6 +651,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
         'X-Goog-Upload-Header-Content-Type': 'image/png',
         'Content-Type': 'application/json',
       },
+      timeout: 20000,
     }
   );
 
@@ -665,6 +666,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     },
     maxContentLength: Infinity,
     maxBodyLength: Infinity,
+    timeout: 30000,
   });
 
   const thumbInitRes = await axios.post(
@@ -679,6 +681,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
         'X-Goog-Upload-Header-Content-Type': 'image/png',
         'Content-Type': 'application/json',
       },
+      timeout: 20000,
     }
   );
 
@@ -692,6 +695,7 @@ const thumbnailName = `thumbnail-${imageId}.png`;
       },
       maxContentLength: Infinity,
       maxBodyLength: Infinity,
+      timeout: 30000,
     });
   }
 
@@ -1629,6 +1633,7 @@ async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText
   console.log(`[graphic-qt] Uploading graphic ${path.basename(localImagePath)} for user ${userId}, QT tweetId=${quoteTweetData?.tweetId || 'none'}`);
   const uploaded = await uploadImageVerified(localImagePath, token);
   if (!uploaded) throw new Error('Failed to upload graphic to Aerielab');
+  console.log(`[graphic-qt] Image uploaded to Firebase OK, now saving post to Aerielab queue...`);
 
   const payload = {
     currentUserId: userId,
@@ -1657,17 +1662,27 @@ async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText
     },
   };
 
-  const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      Origin: 'https://app.aerielab.co',
-      Referer: 'https://app.aerielab.co/queue',
-      'User-Agent': 'Mozilla/5.0',
-    },
-  });
-  console.log(`[graphic-qt] ✅ Graphic QT saved to Aerielab queue: postId=${resp.data?.postId || JSON.stringify(resp.data).substring(0, 100)}`);
-  return resp.data;
+  try {
+    const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Origin: 'https://app.aerielab.co',
+        Referer: 'https://app.aerielab.co/queue',
+        'User-Agent': 'Mozilla/5.0',
+      },
+      timeout: 30000,
+    });
+    console.log(`[graphic-qt] ✅ Graphic QT saved to Aerielab queue: postId=${resp.data?.postId || JSON.stringify(resp.data).substring(0, 100)}`);
+    return resp.data;
+  } catch (err) {
+    console.error(`[graphic-qt] ❌ Aerielab save failed: ${err.message}`);
+    if (err.response) {
+      console.error(`[graphic-qt]   status: ${err.response.status}`);
+      console.error(`[graphic-qt]   body: ${JSON.stringify(err.response.data).substring(0, 500)}`);
+    }
+    throw err;
+  }
 }
 
 // Build the summary graphic (recap of all sections + 16 Spaces playbook art)
@@ -2385,7 +2400,12 @@ app.post('/test-tma-drip-stage', async (req, res) => {
     await executeTmaDripStageOnly(driveFileId, stage, row);
     res.json({ success: true, message: `Stage "${stage}" executed — check Railway logs for [graphic-qt] or [tma-drip] output, and check TMA's Twitter for the actual post` });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      aerielabStatus: err.response?.status,
+      aerielabBody: err.response?.data,
+    });
   }
 });
 
