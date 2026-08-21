@@ -1673,10 +1673,17 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
   const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
   const logo    = b64(path.join(__dirname, 'tma-logo.png'));
   const qr      = b64(path.join(__dirname, 'qr.png'));
-  const playbook = fs.existsSync(path.join(__dirname, '16-spaces-playbook.png'))
-    ? b64(path.join(__dirname, '16-spaces-playbook.png'))
-    : null;
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  // hookImagePaths: local file paths of the same 4 madden-school images used in the
+  // original hook tweet. Rendered as a 2x2 grid — this is the "whole thread" visual,
+  // not a generic static cover.
+  const hookImagePaths = opts.hookImagePaths || [];
+  const gridImgs = hookImagePaths.slice(0, 4).map(p => {
+    const data = b64(p);
+    const ext = path.extname(p).toLowerCase().replace('.', '') || 'png';
+    return `<div class="recap-grid-cell"><img src="data:image/${ext === 'jpg' ? 'jpeg' : ext};base64,${data}"></div>`;
+  }).join('');
 
   const rawHook = (thread.hook || '').split('\n').map(s => s.trim()).find(Boolean) || '';
   const segs = rawHook.split(/\s+—\s+|\s+-\s+/);
@@ -1704,6 +1711,9 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
     .recap-art{flex:1;background:rgba(0,0,0,0.35);border-radius:16px;display:flex;align-items:center;justify-content:center;padding:20px}
     .recap-art img{max-width:100%;max-height:100%;object-fit:contain}
     .recap-header{background:rgba(0,0,0,0.5);color:#fff;padding:14px 22px;border-radius:12px;font-size:28px;font-weight:800;text-align:center;margin-bottom:16px;letter-spacing:1px}
+    .recap-grid{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;background:rgba(0,0,0,0.35);border-radius:16px;padding:16px}
+    .recap-grid-cell{border-radius:10px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
+    .recap-grid-cell img{width:100%;height:100%;object-fit:cover}
   </style></head><body>
     <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
@@ -1718,9 +1728,7 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
           <ol>${sectionSummaries}</ol>
         </div>
         <div class="col">
-          <div class="recap-art">
-            ${playbook ? `<img src="data:image/png;base64,${playbook}">` : `<div style="color:#fff;font-size:24px">16 SPACES PLAYBOOK</div>`}
-          </div>
+          ${gridImgs ? `<div class="recap-grid">${gridImgs}</div>` : `<div class="recap-art"><div style="color:#fff;font-size:24px">THE MADDEN ACADEMY</div></div>`}
         </div>
       </div>
       <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
@@ -1865,14 +1873,33 @@ async function performTmaDripStageAction(driveFileId, stage, row) {
     await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
 
   } else if (stage === 'tmaSummary') {
-    const cardBuf = await buildFacebookSummaryImage(threadForRender);
-    const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
-    fs.writeFileSync(tmpCard, cardBuf);
-    const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+    let hookImageLocalPaths = [];
     try {
-      await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+      const hookImageNames = JSON.parse(row.hookImageUrls || '[]');
+      for (let i = 0; i < hookImageNames.length && i < 4; i++) {
+        try {
+          const p = await downloadFromHfStorage(hookImageNames[i], jwt);
+          hookImageLocalPaths.push(p);
+        } catch (e) {
+          console.error(`[tma-drip] Failed to download hook image ${i + 1} for summary:`, e.message);
+        }
+      }
+    } catch (e) {}
+    if (hookImageLocalPaths.length === 0) {
+      console.log(`[tma-drip] No hookImageUrls available — summary graphic will use fallback (no images)`);
+    }
+    try {
+      const cardBuf = await buildFacebookSummaryImage(threadForRender, { hookImagePaths: hookImageLocalPaths });
+      const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
+      fs.writeFileSync(tmpCard, cardBuf);
+      const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
+      try {
+        await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
+      } finally {
+        try { fs.unlinkSync(tmpCard); } catch (e) {}
+      }
     } finally {
-      try { fs.unlinkSync(tmpCard); } catch (e) {}
+      hookImageLocalPaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
     }
 
   } else if (stage === 'tmaLikeGraphic') {
@@ -1904,6 +1931,25 @@ async function executeTmaDripStep(driveFileId, stage) {
     if (row.tmaDripStage === 'done') {
       console.log(`[tma-drip] Cancelled for ${driveFileId} — stage is 'done'`);
       activeTmaDrips.delete(driveFileId);
+      return;
+    }
+
+    // Guard: legacy/stale rows have no threadDataJson.sections (predates this column
+    // being saved). Permanently kill the chain instead of letting it keep resuming
+    // across future redeploys and eventually firing an empty/irrelevant graphic.
+    let hasRealSections = false;
+    try {
+      const td = JSON.parse(row.threadDataJson || '{}');
+      hasRealSections = Array.isArray(td.sections) && td.sections.length > 0;
+    } catch (e) {}
+    if (!hasRealSections) {
+      console.log(`[tma-drip] ${driveFileId} has no threadDataJson.sections (legacy/stale row) — permanently stopping chain, will not fire "${stage}"`);
+      activeTmaDrips.delete(driveFileId);
+      try {
+        await updateSheetRow(row._rowIndex, { tmaDripStage: 'done', tmaNextDripAt: '' });
+      } catch (e) {
+        console.error(`[tma-drip] Failed to mark ${driveFileId} as done:`, e.message);
+      }
       return;
     }
 
@@ -2937,6 +2983,9 @@ app.post('/post-thread', async (req, res) => {
           const sheetUpdates = {};
           if (Object.keys(sectionRawMediaMap).length > 0) {
             sheetUpdates.sectionRawImageUrls = JSON.stringify(sectionRawMediaMap);
+          }
+          if (hookMedia.length > 0) {
+            sheetUpdates.hookImageUrls = JSON.stringify(hookMedia.map(m => m.name).filter(Boolean));
           }
           sheetUpdates.threadDataJson = JSON.stringify({
             hook: thread.hook || '',
