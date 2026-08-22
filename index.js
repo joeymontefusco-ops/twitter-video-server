@@ -5439,14 +5439,14 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
         const w = containerWidth * 0.65;
         const h = w / imageData[0].ratio;
         const x = (containerWidth - w) / 2;
-        placements = [{ src: imageData[0].src, x, y: 0, w, h }];
+        placements = [{ src: imageData[0].src, x, y: 0, w, h, row: 0 }];
       } else if (n === 2) {
         const w = containerWidth;
         const h0 = w / imageData[0].ratio;
         const h1 = w / imageData[1].ratio;
         placements = [
-          { src: imageData[0].src, x: 0, y: 0, w, h: h0 },
-          { src: imageData[1].src, x: 0, y: h0 + gap, w, h: h1 },
+          { src: imageData[0].src, x: 0, y: 0, w, h: h0, row: 0 },
+          { src: imageData[1].src, x: 0, y: h0 + gap, w, h: h1, row: 1 },
         ];
       } else if (n === 3) {
         const colW = (containerWidth - gap) / 2;
@@ -5456,9 +5456,9 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
         const w2 = containerWidth;
         const h2 = w2 / imageData[2].ratio;
         placements = [
-          { src: imageData[0].src, x: 0, y: 0, w: colW, h: h0 },
-          { src: imageData[1].src, x: colW + gap, y: 0, w: colW, h: h1 },
-          { src: imageData[2].src, x: 0, y: row1Height + gap, w: w2, h: h2 },
+          { src: imageData[0].src, x: 0, y: 0, w: colW, h: h0, row: 0 },
+          { src: imageData[1].src, x: colW + gap, y: 0, w: colW, h: h1, row: 0 },
+          { src: imageData[2].src, x: 0, y: row1Height + gap, w: w2, h: h2, row: 1 },
         ];
       } else if (n === 4) {
         const colW = (containerWidth - gap) / 2;
@@ -5469,10 +5469,10 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
         const h2 = colW / imageData[2].ratio;
         const h3 = colW / imageData[3].ratio;
         placements = [
-          { src: imageData[0].src, x: 0, y: 0, w: colW, h: h0 },
-          { src: imageData[1].src, x: colW + gap, y: 0, w: colW, h: h1 },
-          { src: imageData[2].src, x: 0, y: row2Y, w: colW, h: h2 },
-          { src: imageData[3].src, x: colW + gap, y: row2Y, w: colW, h: h3 },
+          { src: imageData[0].src, x: 0, y: 0, w: colW, h: h0, row: 0 },
+          { src: imageData[1].src, x: colW + gap, y: 0, w: colW, h: h1, row: 0 },
+          { src: imageData[2].src, x: 0, y: row2Y, w: colW, h: h2, row: 1 },
+          { src: imageData[3].src, x: colW + gap, y: row2Y, w: colW, h: h3, row: 1 },
         ];
       } else {
         // 5+ images: greedy 2-column masonry bin-packing (shortest column gets next image)
@@ -5485,7 +5485,7 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
           const x = col * (colW + gap);
           const y = colHeights[col];
           colHeights[col] += h + gap;
-          return { src: img.src, x, y, w, h };
+          return { src: img.src, x, y, w, h, row: null }; // masonry rows aren't discrete — skip re-centering
         });
       }
 
@@ -5494,13 +5494,36 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
       const scaledTotalHeight = maxBottom * scale;
       const offsetY = Math.max(0, (containerHeight - scaledTotalHeight) / 2);
 
-      for (const p of placements) {
+      // Scale each placement's size (never its x from origin — that would drift
+      // everything toward the left edge). Then re-center each row horizontally
+      // using the SCALED widths, so panels stay centered regardless of scale factor.
+      const scaled = placements.map(p => ({ ...p, w: p.w * scale, h: p.h * scale, y: p.y * scale + offsetY }));
+
+      const rowGroups = {};
+      for (const p of scaled) {
+        if (p.row === null) continue;
+        (rowGroups[p.row] = rowGroups[p.row] || []).push(p);
+      }
+      for (const row of Object.values(rowGroups)) {
+        const rowWidth = row.reduce((sum, p) => sum + p.w, 0) + gap * (row.length - 1);
+        let cursorX = (containerWidth - rowWidth) / 2;
+        for (const p of row) {
+          p.x = cursorX;
+          cursorX += p.w + gap;
+        }
+      }
+      // Masonry (row: null) items keep their proportionally-scaled x position
+      for (const p of scaled) {
+        if (p.row === null) p.x = p.x * scale;
+      }
+
+      for (const p of scaled) {
         const div = document.createElement('div');
         div.className = 'debate-img';
-        div.style.left = (p.x * scale) + 'px';
-        div.style.top = (p.y * scale + offsetY) + 'px';
-        div.style.width = (p.w * scale) + 'px';
-        div.style.height = (p.h * scale) + 'px';
+        div.style.left = p.x + 'px';
+        div.style.top = p.y + 'px';
+        div.style.width = p.w + 'px';
+        div.style.height = p.h + 'px';
         const img = document.createElement('img');
         img.src = p.src;
         div.appendChild(img);
