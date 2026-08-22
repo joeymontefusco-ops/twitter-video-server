@@ -5279,7 +5279,11 @@ const DEBATE_DELAY_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
 // The two known Firestore category doc IDs for TMA's debate/discussion content.
 // Any post tagged with EITHER category triggers the auto-graphic, regardless of
 // its actual wording ("Settle the debate:", "Keep Or Kill?", "Debate a wall:", etc.)
-const DEBATE_CATEGORY_IDS = ['DimWoSmFLnfGT6XdKekG', 'mlcBc0ty0BFZCXz2eYlj']; // Discussion Post, M27 debate
+const DEBATE_CATEGORY_IDS = [
+  'DimWoSmFLnfGT6XdKekG', // Discussion Post
+  'mlcBc0ty0BFZCXz2eYlj', // M27 debate
+  'WqAvuwrguK6HlM1xqagX', // Madden 26 discussion
+];
 
 function isDebatePost(categoryIds) {
   if (!Array.isArray(categoryIds)) return false;
