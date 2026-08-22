@@ -5369,28 +5369,26 @@ async function downloadTweetMediaImages(mediaFieldValue, jwtToken) {
 
 // Build the "Settle the Debate" branded graphic. Fixed headline + question + up to 2 images.
 async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
+  const sharp = require('sharp');
   const b64 = p => fs.readFileSync(p).toString('base64');
   const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
   const logo    = b64(path.join(__dirname, 'tma-logo.png'));
   const qr      = b64(path.join(__dirname, 'qr.png'));
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  const n = Math.min(imagePaths.length, 6);
-  // Uniform grid shape per count — every cell same size, images fill via object-fit:cover.
-  let cols, rows;
-  if (n <= 1) { cols = 1; rows = 1; }
-  else if (n === 2) { cols = 1; rows = 2; }
-  else if (n === 3) { cols = 2; rows = 2; } // 2 on top, 1 spanning full width below
-  else if (n === 4) { cols = 2; rows = 2; }
-  else if (n === 5) { cols = 3; rows = 2; }
-  else { cols = 3; rows = 2; } // 6 images: 3x2
-
-  const imgTags = imagePaths.slice(0, 6).map((p, i) => {
-    const data = b64(p);
+  const imgs = imagePaths.slice(0, 6);
+  // Read each image's REAL aspect ratio so panels can hug their image exactly —
+  // no forced equal heights, no cropping, no dead space inside any panel.
+  const imageData = [];
+  for (const p of imgs) {
+    let ratio = 16 / 9; // fallback if metadata read fails
+    try {
+      const meta = await sharp(p).metadata();
+      if (meta.width && meta.height) ratio = meta.width / meta.height;
+    } catch (e) {}
     const ext = path.extname(p).toLowerCase() === '.jpg' || path.extname(p).toLowerCase() === '.jpeg' ? 'jpeg' : 'png';
-    const spanStyle = (n === 3 && i === 2) ? ' style="grid-column: span 2"' : '';
-    return `<div class="debate-img"${spanStyle}><img src="data:image/${ext};base64,${data}"></div>`;
-  }).join('');
+    imageData.push({ src: `data:image/${ext};base64,${b64(p)}`, ratio });
+  }
 
   // When the headline is hidden, .debate-wrap needs its own top margin so it doesn't
   // sit flush against the brand row — replaces the spacing the <h1> used to provide.
@@ -5398,9 +5396,9 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
     ${BASE_CSS}
     .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;min-height:0;padding-top:${showHeadline ? '6px' : '22px'}}
     .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
-    .debate-images{display:grid;grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);gap:20px;flex:1;min-height:0}
-    .debate-img{border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);min-height:0;min-width:0}
-    .debate-img img{width:100%;height:100%;object-fit:cover;object-position:center;display:block}
+    .debate-images{position:relative;flex:1;min-height:0}
+    .debate-img{position:absolute;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25)}
+    .debate-img img{width:100%;height:100%;object-fit:contain;display:block}
   </style></head><body>
     <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
@@ -5411,7 +5409,7 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
       ${showHeadline ? '<h1>SETTLE THE DEBATE</h1>' : ''}
       <div class="debate-wrap">
         <div class="debate-question">${esc(question)}</div>
-        <div class="debate-images">${imgTags}</div>
+        <div class="debate-images" id="masonry-container"></div>
       </div>
       <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
     </div>
@@ -5425,6 +5423,91 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
     await page.setContent(html, { waitUntil: 'networkidle0' });
+
+    // Compute exact "hug the image" placements per the image-count rules, using each
+    // image's real aspect ratio. Runs in the browser so it can measure the container's
+    // actual pixel size after layout (header/question/footer already accounted for).
+    await page.evaluate((imageData) => {
+      const container = document.getElementById('masonry-container');
+      const containerWidth = container.clientWidth;
+      const containerHeight = container.clientHeight;
+      const gap = 20;
+      const n = imageData.length;
+      let placements = [];
+
+      if (n === 1) {
+        const w = containerWidth * 0.65;
+        const h = w / imageData[0].ratio;
+        const x = (containerWidth - w) / 2;
+        placements = [{ src: imageData[0].src, x, y: 0, w, h }];
+      } else if (n === 2) {
+        const w = containerWidth;
+        const h0 = w / imageData[0].ratio;
+        const h1 = w / imageData[1].ratio;
+        placements = [
+          { src: imageData[0].src, x: 0, y: 0, w, h: h0 },
+          { src: imageData[1].src, x: 0, y: h0 + gap, w, h: h1 },
+        ];
+      } else if (n === 3) {
+        const colW = (containerWidth - gap) / 2;
+        const h0 = colW / imageData[0].ratio;
+        const h1 = colW / imageData[1].ratio;
+        const row1Height = Math.max(h0, h1);
+        const w2 = containerWidth;
+        const h2 = w2 / imageData[2].ratio;
+        placements = [
+          { src: imageData[0].src, x: 0, y: 0, w: colW, h: h0 },
+          { src: imageData[1].src, x: colW + gap, y: 0, w: colW, h: h1 },
+          { src: imageData[2].src, x: 0, y: row1Height + gap, w: w2, h: h2 },
+        ];
+      } else if (n === 4) {
+        const colW = (containerWidth - gap) / 2;
+        const h0 = colW / imageData[0].ratio;
+        const h1 = colW / imageData[1].ratio;
+        const row1Height = Math.max(h0, h1);
+        const row2Y = row1Height + gap;
+        const h2 = colW / imageData[2].ratio;
+        const h3 = colW / imageData[3].ratio;
+        placements = [
+          { src: imageData[0].src, x: 0, y: 0, w: colW, h: h0 },
+          { src: imageData[1].src, x: colW + gap, y: 0, w: colW, h: h1 },
+          { src: imageData[2].src, x: 0, y: row2Y, w: colW, h: h2 },
+          { src: imageData[3].src, x: colW + gap, y: row2Y, w: colW, h: h3 },
+        ];
+      } else {
+        // 5+ images: greedy 2-column masonry bin-packing (shortest column gets next image)
+        const colW = (containerWidth - gap) / 2;
+        const colHeights = [0, 0];
+        placements = imageData.map((img) => {
+          const col = colHeights[0] <= colHeights[1] ? 0 : 1;
+          const w = colW;
+          const h = colW / img.ratio;
+          const x = col * (colW + gap);
+          const y = colHeights[col];
+          colHeights[col] += h + gap;
+          return { src: img.src, x, y, w, h };
+        });
+      }
+
+      const maxBottom = Math.max(...placements.map(p => p.y + p.h));
+      const scale = maxBottom > containerHeight ? containerHeight / maxBottom : 1;
+      const scaledTotalHeight = maxBottom * scale;
+      const offsetY = Math.max(0, (containerHeight - scaledTotalHeight) / 2);
+
+      for (const p of placements) {
+        const div = document.createElement('div');
+        div.className = 'debate-img';
+        div.style.left = (p.x * scale) + 'px';
+        div.style.top = (p.y * scale + offsetY) + 'px';
+        div.style.width = (p.w * scale) + 'px';
+        div.style.height = (p.h * scale) + 'px';
+        const img = document.createElement('img');
+        img.src = p.src;
+        div.appendChild(img);
+        container.appendChild(div);
+      }
+    }, imageData);
+
     return await page.screenshot({ type: 'png' });
   } finally { await browser.close(); }
 }
