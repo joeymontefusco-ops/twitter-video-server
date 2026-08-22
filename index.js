@@ -2419,6 +2419,62 @@ async function createWordPressPost(data) {
 // Main orchestrator: gather thread data, generate blog, upload images, publish
 // ─── /test-blog-post — manually trigger blog auto-create for a specific driveFileId ──
 // ─── /test-tma-drip-stage — manually fire any TMA drip stage immediately for testing ──
+// ─── /test-debate-graphic — manually test the "Settle the Debate" graphic pipeline ──
+// docId = a Firestore threads/{docId} that IS a "Settle the debate" post.
+// postLive=false (default) → generates the graphic and returns it as base64 for inspection, doesn't post.
+// postLive=true → actually posts to Twitter + Facebook (real, immediate — skips the 2-day wait).
+app.post('/test-debate-graphic', async (req, res) => {
+  const { docId, postLive } = req.body;
+  if (!docId) return res.status(400).json({ error: 'Missing docId' });
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+    const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+    const fullDoc = await getFirestoreDocByRef(`projects/${project}/databases/(default)/documents/threads/${docId}`);
+    const firstTweetStatus = fullDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields?.status?.stringValue || '';
+
+    if (!isDebatePost(firstTweetStatus)) {
+      return res.json({ success: false, message: `Doc ${docId}'s first tweet doesn't look like a "Settle the debate" post`, firstTweetStatus });
+    }
+
+    const question = extractDebateQuestion(firstTweetStatus);
+    if (!question) {
+      return res.json({ success: false, message: 'Could not extract a question from the tweet text', firstTweetStatus });
+    }
+
+    const mediaField = fullDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields?.media;
+    const imagePaths = mediaField ? await downloadTweetMediaImages(mediaField, jwt) : [];
+    if (imagePaths.length === 0) {
+      return res.json({ success: false, message: 'No images found on the original debate post', question });
+    }
+
+    const graphicBuf = await buildDebateGraphic(question, imagePaths);
+    imagePaths.forEach(p => { try { fs.unlinkSync(p); } catch (e) {} });
+
+    if (!postLive) {
+      return res.json({
+        success: true,
+        question,
+        imageCount: imagePaths.length,
+        message: 'Dry run — graphic generated but NOT posted. Pass postLive:true to actually post.',
+        graphicBase64: graphicBuf.toString('base64'),
+      });
+    }
+
+    const tmpPath = path.join('/tmp', `debate_test_${Date.now()}.png`);
+    fs.writeFileSync(tmpPath, graphicBuf);
+    try {
+      const twitterResult = await postDebateGraphicToTwitter(tmpPath);
+      await postToFacebook('', [tmpPath]);
+      res.json({ success: true, question, imageCount: imagePaths.length, postedLive: true, twitterResult });
+    } finally {
+      try { fs.unlinkSync(tmpPath); } catch (e) {}
+    }
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/test-tma-drip-stage', async (req, res) => {
   const { driveFileId, stage } = req.body;
   if (!driveFileId || !stage) return res.status(400).json({ error: 'Missing driveFileId or stage' });
