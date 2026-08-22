@@ -2474,7 +2474,7 @@ app.post('/test-debate-graphic', async (req, res) => {
 
     const tmpPath = path.join('/tmp', `debate_test_${Date.now()}.png`);
     fs.writeFileSync(tmpPath, graphicBuf);
-    const categoryDocId = skipCategory ? null : (categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null);
+    const categoryDocId = skipCategory ? null : (showHeadline ? M27_DEBATE_CATEGORY_ID : DISCUSSION_POST_CATEGORY_ID);
     console.log(`[test-debate-graphic] Uploading + queuing in Aerielab (categoryDocId=${categoryDocId})...`);
     try {
       const queueResult = await postDebateGraphicToTwitter(tmpPath, categoryDocId);
@@ -5655,8 +5655,9 @@ async function checkForDebatePosts() {
           continue;
         }
         const showHeadline = shouldShowDebateHeadline(doc.categoryIds, question);
-        // Tag the queued graphic with whichever debate/discussion category the source post had
-        const categoryDocId = doc.categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null;
+        // Category mirrors the headline decision: graphic shows "SETTLE THE DEBATE" → M27 debate;
+        // otherwise → Discussion Post. Not copied from the source post's own categories.
+        const categoryDocId = showHeadline ? M27_DEBATE_CATEGORY_ID : DISCUSSION_POST_CATEGORY_ID;
         scheduleDebateGraphic(doc.docId, question, imagePaths, showHeadline, categoryDocId);
       } catch (e) {
         console.error(`[debate] ${doc.docId} failed:`, e.message);
