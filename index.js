@@ -3668,6 +3668,46 @@ app.post('/test-aerielab-thread', async (req, res) => {
   }
 });
 
+// ─── /test-aerielab-list-categories — list ALL categories for TMA (name → docId) ──
+app.post('/test-aerielab-list-categories', async (req, res) => {
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+    const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+    const userRef = `projects/${project}/databases/(default)/documents/users/${TMA_USER_ID_CONST}`;
+
+    const query = {
+      structuredQuery: {
+        from: [{ collectionId: 'categories' }],
+        where: {
+          fieldFilter: { field: { fieldPath: 'user' }, op: 'EQUAL', value: { referenceValue: userRef } },
+        },
+        limit: 100,
+      },
+    };
+    const url = `https://firestore.googleapis.com/v1/projects/${project}/databases/(default)/documents:runQuery`;
+    const resp = await axios.post(url, query, {
+      headers: { Authorization: `Bearer ${jwt}`, 'Content-Type': 'application/json' },
+      timeout: 20000,
+    });
+
+    const categories = (resp.data || []).filter(r => r.document).map(r => {
+      const doc = r.document;
+      const docId = (doc.name || '').split('/').pop();
+      const fields = doc.fields || {};
+      return {
+        docId,
+        name: fields.name?.stringValue || fields.title?.stringValue || JSON.stringify(fields).substring(0, 200),
+        allFieldKeys: Object.keys(fields),
+      };
+    });
+
+    res.json({ success: true, count: categories.length, categories });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message, status: err.response?.status, data: err.response?.data });
+  }
+});
+
 app.post('/test-aerielab-category', async (req, res) => {
   const { categoryId } = req.body;
   if (!categoryId) return res.status(400).json({ error: 'Missing categoryId' });
@@ -5271,33 +5311,36 @@ async function downloadTweetMediaImages(mediaFieldValue, jwtToken) {
 
 // Build the "Settle the Debate" branded graphic. Fixed headline + question + up to 2 images.
 async function buildDebateGraphic(question, imagePaths) {
-  const sharp = require('sharp');
   const b64 = p => fs.readFileSync(p).toString('base64');
   const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
   const logo    = b64(path.join(__dirname, 'tma-logo.png'));
   const qr      = b64(path.join(__dirname, 'qr.png'));
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  const imgs = imagePaths.slice(0, 6);
-  // Read each image's REAL aspect ratio so the masonry can size panels to hug content exactly.
-  const imageData = [];
-  for (const p of imgs) {
-    let ratio = 16 / 9; // sane fallback if metadata read fails
-    try {
-      const meta = await sharp(p).metadata();
-      if (meta.width && meta.height) ratio = meta.width / meta.height;
-    } catch (e) {}
+  const n = Math.min(imagePaths.length, 6);
+  // Uniform grid shape per count — every cell same size, images fill via object-fit:cover.
+  let cols, rows;
+  if (n <= 1) { cols = 1; rows = 1; }
+  else if (n === 2) { cols = 1; rows = 2; }
+  else if (n === 3) { cols = 2; rows = 2; } // 2 on top, 1 spanning full width below
+  else if (n === 4) { cols = 2; rows = 2; }
+  else if (n === 5) { cols = 3; rows = 2; }
+  else { cols = 3; rows = 2; } // 6 images: 3x2
+
+  const imgTags = imagePaths.slice(0, 6).map((p, i) => {
+    const data = b64(p);
     const ext = path.extname(p).toLowerCase() === '.jpg' || path.extname(p).toLowerCase() === '.jpeg' ? 'jpeg' : 'png';
-    imageData.push({ src: `data:image/${ext};base64,${b64(p)}`, ratio });
-  }
+    const spanStyle = (n === 3 && i === 2) ? ' style="grid-column: span 2"' : '';
+    return `<div class="debate-img"${spanStyle}><img src="data:image/${ext};base64,${data}"></div>`;
+  }).join('');
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     ${BASE_CSS}
     .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;min-height:0;padding-top:6px}
     .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
-    .debate-images{position:relative;flex:1;min-height:0}
-    .debate-img{position:absolute;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
-    .debate-img img{width:100%;height:100%;object-fit:contain;display:block}
+    .debate-images{display:grid;grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);gap:20px;flex:1;min-height:0}
+    .debate-img{border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);min-height:0;min-width:0}
+    .debate-img img{width:100%;height:100%;object-fit:cover;object-position:center;display:block}
   </style></head><body>
     <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
@@ -5308,7 +5351,7 @@ async function buildDebateGraphic(question, imagePaths) {
       <h1>SETTLE THE DEBATE</h1>
       <div class="debate-wrap">
         <div class="debate-question">${esc(question)}</div>
-        <div class="debate-images" id="masonry-container"></div>
+        <div class="debate-images">${imgTags}</div>
       </div>
       <div class="foot"><div class="url">THEMADDENACADEMY.COM</div><div class="qr"><img src="data:image/png;base64,${qr}"></div></div>
     </div>
@@ -5322,55 +5365,10 @@ async function buildDebateGraphic(question, imagePaths) {
     const page = await browser.newPage();
     await page.setViewport({ width: 1080, height: 1350, deviceScaleFactor: 1 });
     await page.setContent(html, { waitUntil: 'networkidle0' });
-
-    // Build the masonry layout in the browser context using the container's real
-    // measured size — guarantees exact-fit sizing (no CSS-masonry guesswork).
-    await page.evaluate((imageData) => {
-      const container = document.getElementById('masonry-container');
-      const containerWidth = container.clientWidth;
-      const containerHeight = container.clientHeight;
-      const gap = 20;
-      const n = imageData.length;
-      const cols = n <= 1 ? 1 : 2;
-      const colWidth = (containerWidth - gap * (cols - 1)) / cols;
-
-      const colHeights = new Array(cols).fill(0);
-      const placements = imageData.map((img) => {
-        let col = 0;
-        for (let c = 1; c < cols; c++) if (colHeights[c] < colHeights[col]) col = c;
-        const w = colWidth;
-        const h = colWidth / img.ratio;
-        const x = col * (colWidth + gap);
-        const y = colHeights[col];
-        colHeights[col] += h + gap;
-        return { src: img.src, x, y, w, h };
-      });
-
-      const maxColHeight = Math.max(...colHeights.map(h => Math.max(h - gap, 0)));
-      const scale = maxColHeight > containerHeight ? containerHeight / maxColHeight : 1;
-      const scaledTotalHeight = maxColHeight * scale;
-      const offsetY = Math.max(0, (containerHeight - scaledTotalHeight) / 2);
-
-      for (const p of placements) {
-        const div = document.createElement('div');
-        div.className = 'debate-img';
-        div.style.left = (p.x * scale) + 'px';
-        div.style.top = (p.y * scale + offsetY) + 'px';
-        div.style.width = (p.w * scale) + 'px';
-        div.style.height = (p.h * scale) + 'px';
-        const img = document.createElement('img');
-        img.src = p.src;
-        div.appendChild(img);
-        container.appendChild(div);
-      }
-    }, imageData);
-
     return await page.screenshot({ type: 'png' });
   } finally { await browser.close(); }
 }
 
-
-// Post the debate graphic standalone to Twitter (TMA account, no QT)
 async function postDebateGraphicToTwitter(localImagePath) {
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
