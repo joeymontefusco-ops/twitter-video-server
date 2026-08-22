@@ -2424,7 +2424,7 @@ async function createWordPressPost(data) {
 // postLive=false (default) → generates the graphic and returns it as base64 for inspection, doesn't post.
 // postLive=true → actually posts to Twitter + Facebook (real, immediate — skips the 2-day wait).
 app.post('/test-debate-graphic', async (req, res) => {
-  const { docId, postLive } = req.body;
+  const { docId, postLive, forceShowHeadline } = req.body;
   if (!docId) return res.status(400).json({ error: 'Missing docId' });
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
@@ -2444,19 +2444,26 @@ app.post('/test-debate-graphic', async (req, res) => {
       return res.json({ success: false, message: 'Could not extract caption text from the post', firstTweetStatus });
     }
 
+    // forceShowHeadline lets you override the computed decision for testing (true/false/omit)
+    const showHeadline = typeof forceShowHeadline === 'boolean'
+      ? forceShowHeadline
+      : shouldShowDebateHeadline(categoryIds, question);
+
     const mediaField = fullDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields?.media;
     const imagePaths = mediaField ? await downloadTweetMediaImages(mediaField, jwt) : [];
     if (imagePaths.length === 0) {
-      return res.json({ success: false, message: 'No images found on the original debate post', question });
+      return res.json({ success: false, message: 'No images found on the original debate post', question, categoryIds, showHeadline });
     }
 
-    const graphicBuf = await buildDebateGraphic(question, imagePaths);
+    const graphicBuf = await buildDebateGraphic(question, imagePaths, showHeadline);
     imagePaths.forEach(p => { try { fs.unlinkSync(p); } catch (e) {} });
 
     if (!postLive) {
       return res.json({
         success: true,
         question,
+        categoryIds,
+        showHeadline,
         imageCount: imagePaths.length,
         message: 'Dry run — graphic generated but NOT posted. Pass postLive:true to actually post.',
         graphicBase64: graphicBuf.toString('base64'),
@@ -2468,7 +2475,7 @@ app.post('/test-debate-graphic', async (req, res) => {
     try {
       const twitterResult = await postDebateGraphicToTwitter(tmpPath);
       await postToFacebook('', [tmpPath]);
-      res.json({ success: true, question, imageCount: imagePaths.length, postedLive: true, twitterResult });
+      res.json({ success: true, question, categoryIds, showHeadline, imageCount: imagePaths.length, postedLive: true, twitterResult });
     } finally {
       try { fs.unlinkSync(tmpPath); } catch (e) {}
     }
@@ -5284,10 +5291,42 @@ const DEBATE_CATEGORY_IDS = [
   'mlcBc0ty0BFZCXz2eYlj', // M27 debate
   'WqAvuwrguK6HlM1xqagX', // Madden 26 discussion
 ];
+const M27_DEBATE_CATEGORY_ID = 'mlcBc0ty0BFZCXz2eYlj';
+const DISCUSSION_POST_CATEGORY_ID = 'DimWoSmFLnfGT6XdKekG';
 
 function isDebatePost(categoryIds) {
   if (!Array.isArray(categoryIds)) return false;
   return categoryIds.some(id => DEBATE_CATEGORY_IDS.includes(id));
+}
+
+// Keyword check for debate-style intent in caption text (used for Discussion Post
+// category, and as the default fallback for any other category).
+function isDebateIntentText(text) {
+  const t = String(text || '').toLowerCase();
+  const patterns = [
+    /settle the debate/,
+    /\bdebate\b/,
+    /\bvs\.?\b/,
+    /\bwhich is better\b/,
+    /\bgood or bad\b/,
+    /\bagree or disagree\b/,
+    /\bbetter or worse\b/,
+    /\bkeep or kill\b/,
+    /\byes or no\b/,
+    /\bright or wrong\b/,
+    /\b\w+\s+or\s+\w+\?/, // generic "X or Y?" pattern
+  ];
+  return patterns.some(re => re.test(t));
+}
+
+// Decide whether the "SETTLE THE DEBATE" headline should render, per category rules:
+//   - M27 debate category → always show
+//   - Discussion Post category → show only if caption reads as debate-style
+//   - Any other category → same keyword check as the default fallback
+function shouldShowDebateHeadline(categoryIds, captionText) {
+  const ids = Array.isArray(categoryIds) ? categoryIds : [];
+  if (ids.includes(M27_DEBATE_CATEGORY_ID)) return true;
+  return isDebateIntentText(captionText);
 }
 
 // Extract the post's actual caption/topic to show below the fixed "SETTLE THE DEBATE"
@@ -5329,7 +5368,7 @@ async function downloadTweetMediaImages(mediaFieldValue, jwtToken) {
 }
 
 // Build the "Settle the Debate" branded graphic. Fixed headline + question + up to 2 images.
-async function buildDebateGraphic(question, imagePaths) {
+async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
   const b64 = p => fs.readFileSync(p).toString('base64');
   const brainBg = b64(path.join(__dirname, 'brain-bg.png'));
   const logo    = b64(path.join(__dirname, 'tma-logo.png'));
@@ -5353,9 +5392,11 @@ async function buildDebateGraphic(question, imagePaths) {
     return `<div class="debate-img"${spanStyle}><img src="data:image/${ext};base64,${data}"></div>`;
   }).join('');
 
+  // When the headline is hidden, .debate-wrap needs its own top margin so it doesn't
+  // sit flush against the brand row — replaces the spacing the <h1> used to provide.
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     ${BASE_CSS}
-    .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;min-height:0;padding-top:6px}
+    .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;min-height:0;padding-top:${showHeadline ? '6px' : '22px'}}
     .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
     .debate-images{display:grid;grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);gap:20px;flex:1;min-height:0}
     .debate-img{border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);min-height:0;min-width:0}
@@ -5367,7 +5408,7 @@ async function buildDebateGraphic(question, imagePaths) {
         <div class="brand"><img src="data:image/png;base64,${logo}"><span>The Madden<br>Academy</span></div>
         <div class="pill" style="white-space:nowrap"><span class="m" style="color:#2e7bd6">MENTAL</span> <span class="o" style="color:#0a0a0a">OVER META</span></div>
       </div>
-      <h1>SETTLE THE DEBATE</h1>
+      ${showHeadline ? '<h1>SETTLE THE DEBATE</h1>' : ''}
       <div class="debate-wrap">
         <div class="debate-question">${esc(question)}</div>
         <div class="debate-images">${imgTags}</div>
@@ -5417,11 +5458,11 @@ async function postDebateGraphicToTwitter(localImagePath) {
 }
 
 // Schedule the debate graphic to fire 2 days after the original debate post
-function scheduleDebateGraphic(docId, question, imagePaths) {
-  console.log(`[debate] Scheduling graphic for ${docId} in 2 days: "${question.substring(0, 60)}..."`);
+function scheduleDebateGraphic(docId, question, imagePaths, showHeadline = true) {
+  console.log(`[debate] Scheduling graphic for ${docId} in 2 days: "${question.substring(0, 60)}..." (headline: ${showHeadline ? 'shown' : 'hidden'})`);
   setTimeout(async () => {
     try {
-      const graphicBuf = await buildDebateGraphic(question, imagePaths);
+      const graphicBuf = await buildDebateGraphic(question, imagePaths, showHeadline);
       const tmpPath = path.join('/tmp', `debate_graphic_${Date.now()}.png`);
       fs.writeFileSync(tmpPath, graphicBuf);
       try {
@@ -5474,7 +5515,8 @@ async function checkForDebatePosts() {
           console.log(`[debate] ${doc.docId}: no images found on original post — skipping`);
           continue;
         }
-        scheduleDebateGraphic(doc.docId, question, imagePaths);
+        const showHeadline = shouldShowDebateHeadline(doc.categoryIds, question);
+        scheduleDebateGraphic(doc.docId, question, imagePaths, showHeadline);
       } catch (e) {
         console.error(`[debate] ${doc.docId} failed:`, e.message);
       }
