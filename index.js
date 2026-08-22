@@ -5556,14 +5556,11 @@ async function postDebateGraphicToTwitter(localImagePath, categoryDocId = null) 
   if (!uploaded) throw new Error('Failed to upload debate graphic to Aerielab');
   console.log('[debate-queue] Firebase upload OK, building Aerielab payload...');
 
-  const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
-  // NOTE: category reference format is a best-effort match to how Firestore stores
-  // it elsewhere (raw referenceValue) — not yet confirmed against what Aerielab's
-  // /api/posts/save endpoint itself expects. Verify the category actually shows up
-  // correctly in Aerielab's queue UI after the first real test.
-  const categories = categoryDocId
-    ? [{ referenceValue: `projects/${project}/databases/(default)/documents/categories/${categoryDocId}` }]
-    : [];
+  // NOTE: tried the raw-Firestore referenceValue-object format first — Aerielab's
+  // /api/posts/save endpoint rejected it (500). Trying the simpler plain-ID-string
+  // array shape instead, since their API likely constructs the Firestore reference
+  // internally from just the ID.
+  const categories = categoryDocId ? [categoryDocId] : [];
 
   const payload = buildFullAerielabPostPayload(TMA_USER_ID_CONST, [{
     status: '',
