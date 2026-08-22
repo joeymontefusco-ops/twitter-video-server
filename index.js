@@ -2455,7 +2455,9 @@ app.post('/test-debate-graphic', async (req, res) => {
       return res.json({ success: false, message: 'No images found on the original debate post', question, categoryIds, showHeadline });
     }
 
+    console.log('[test-debate-graphic] Building graphic with Puppeteer...');
     const graphicBuf = await buildDebateGraphic(question, imagePaths, showHeadline);
+    console.log(`[test-debate-graphic] Graphic built OK (${graphicBuf.length} bytes)`);
     imagePaths.forEach(p => { try { fs.unlinkSync(p); } catch (e) {} });
 
     if (!postLive) {
@@ -2473,14 +2475,22 @@ app.post('/test-debate-graphic', async (req, res) => {
     const tmpPath = path.join('/tmp', `debate_test_${Date.now()}.png`);
     fs.writeFileSync(tmpPath, graphicBuf);
     const categoryDocId = categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null;
+    console.log(`[test-debate-graphic] Uploading + queuing in Aerielab (categoryDocId=${categoryDocId})...`);
     try {
       const queueResult = await postDebateGraphicToTwitter(tmpPath, categoryDocId);
+      console.log('[test-debate-graphic] Queue succeeded');
       res.json({ success: true, question, categoryIds, categoryDocId, showHeadline, imageCount: imagePaths.length, queuedInAerielab: true, queueResult });
     } finally {
       try { fs.unlinkSync(tmpPath); } catch (e) {}
     }
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    console.error('[test-debate-graphic] CRASH:', err.message, err.stack?.substring(0, 500));
+    res.status(500).json({
+      success: false,
+      error: err.message,
+      aerielabStatus: err.response?.status,
+      aerielabBody: err.response?.data,
+    });
   }
 });
 
@@ -5541,8 +5551,10 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
 async function postDebateGraphicToTwitter(localImagePath, categoryDocId = null) {
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
+  console.log(`[debate-queue] Uploading graphic to Firebase: ${path.basename(localImagePath)}`);
   const uploaded = await uploadImageVerified(localImagePath, token);
   if (!uploaded) throw new Error('Failed to upload debate graphic to Aerielab');
+  console.log('[debate-queue] Firebase upload OK, building Aerielab payload...');
 
   const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
   // NOTE: category reference format is a best-effort match to how Firestore stores
@@ -5562,17 +5574,27 @@ async function postDebateGraphicToTwitter(localImagePath, categoryDocId = null) 
     quoteTweetData: null,
   }], { postNow: false, categories }); // queue for review, don't auto-publish
 
-  const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      Origin: 'https://app.aerielab.co',
-      Referer: 'https://app.aerielab.co/queue',
-      'User-Agent': 'Mozilla/5.0',
-    },
-    timeout: 30000,
-  });
-  return resp.data;
+  try {
+    const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Origin: 'https://app.aerielab.co',
+        Referer: 'https://app.aerielab.co/queue',
+        'User-Agent': 'Mozilla/5.0',
+      },
+      timeout: 30000,
+    });
+    console.log(`[debate-queue] \u2705 Queued in Aerielab: postId=${resp.data?.postId || JSON.stringify(resp.data).substring(0, 100)}`);
+    return resp.data;
+  } catch (err) {
+    console.error(`[debate-queue] \u274c Aerielab save failed: ${err.message}`);
+    if (err.response) {
+      console.error(`[debate-queue]   status: ${err.response.status}`);
+      console.error(`[debate-queue]   body: ${JSON.stringify(err.response.data).substring(0, 500)}`);
+    }
+    throw err;
+  }
 }
 
 // Schedule the debate graphic to fire 2 days after the original debate post
