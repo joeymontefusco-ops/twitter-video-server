@@ -2432,14 +2432,16 @@ app.post('/test-debate-graphic', async (req, res) => {
     const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
     const fullDoc = await getFirestoreDocByRef(`projects/${project}/databases/(default)/documents/threads/${docId}`);
     const firstTweetStatus = fullDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields?.status?.stringValue || '';
+    const categoryIds = (fullDoc.fields?.categories?.arrayValue?.values || [])
+      .map(v => v.referenceValue).filter(Boolean).map(ref => ref.split('/').pop());
 
-    if (!isDebatePost(firstTweetStatus)) {
-      return res.json({ success: false, message: `Doc ${docId}'s first tweet doesn't look like a "Settle the debate" post`, firstTweetStatus });
+    if (!isDebatePost(categoryIds)) {
+      return res.json({ success: false, message: `Doc ${docId} is not tagged with the Discussion Post / M27 debate category`, categoryIds, firstTweetStatus });
     }
 
     const question = extractDebateQuestion(firstTweetStatus);
     if (!question) {
-      return res.json({ success: false, message: 'Could not extract a question from the tweet text', firstTweetStatus });
+      return res.json({ success: false, message: 'Could not extract caption text from the post', firstTweetStatus });
     }
 
     const mediaField = fullDoc.fields?.tweets?.arrayValue?.values?.[0]?.mapValue?.fields?.media;
@@ -5111,6 +5113,10 @@ async function queryTmaThreadsFirestore(minutesBack, limit = 20) {
     const docId = (doc.name || '').split('/').pop();
     const fields = doc.fields || {};
     const firstTweet = fields.tweets?.arrayValue?.values?.[0]?.mapValue?.fields;
+    const categoryRefs = (fields.categories?.arrayValue?.values || [])
+      .map(v => v.referenceValue)
+      .filter(Boolean)
+      .map(ref => ref.split('/').pop()); // just the docId, not full path
     return {
       docId,
       tweetId: fields.tweetId?.stringValue || null,
@@ -5120,6 +5126,7 @@ async function queryTmaThreadsFirestore(minutesBack, limit = 20) {
       clonedFromPost: fields.clonedFromPost?.referenceValue || null,
       firstTweetStatus: firstTweet?.status?.stringValue || null,
       firstTweetTweetId: firstTweet?.tweetId?.stringValue || null,
+      categoryIds: categoryRefs,
     };
   });
 }
@@ -5269,18 +5276,26 @@ const DEBATE_LOOKBACK_MIN = 60 * 24 * 3; // scan last 3 days for newly-published
 const DEBATE_DELAY_MS = 2 * 24 * 60 * 60 * 1000; // 2 days
 
 // Detect if a thread doc's first tweet is a "Settle the debate" post
-function isDebatePost(firstTweetStatus) {
-  return /settle the debate/i.test(firstTweetStatus || '');
+// The two known Firestore category doc IDs for TMA's debate/discussion content.
+// Any post tagged with EITHER category triggers the auto-graphic, regardless of
+// its actual wording ("Settle the debate:", "Keep Or Kill?", "Debate a wall:", etc.)
+const DEBATE_CATEGORY_IDS = ['DimWoSmFLnfGT6XdKekG', 'mlcBc0ty0BFZCXz2eYlj']; // Discussion Post, M27 debate
+
+function isDebatePost(categoryIds) {
+  if (!Array.isArray(categoryIds)) return false;
+  return categoryIds.some(id => DEBATE_CATEGORY_IDS.includes(id));
 }
 
-// Extract the debate question from the tweet text.
-// Format: "Settle the debate:\n\n<question line(s)>"
+// Extract the post's actual caption/topic to show below the fixed "SETTLE THE DEBATE"
+// headline. Since posts use many different formats ("Settle the debate:", "Keep Or
+// Kill?", "Debate a wall:", etc.), we don't try to parse a specific structure —
+// just clean up the raw text and use it as-is.
 function extractDebateQuestion(text) {
-  const lines = String(text || '').split('\n').map(l => l.trim()).filter(Boolean);
-  // First line is "Settle the debate:" — question is everything after
-  const idx = lines.findIndex(l => /settle the debate/i.test(l));
-  const questionLines = idx >= 0 ? lines.slice(idx + 1) : lines.slice(1);
-  return questionLines.join(' ').trim() || lines.slice(-1)[0] || '';
+  const raw = String(text || '').trim();
+  if (!raw) return '';
+  // Strip common lead-in phrases if present (keeps the rest of the text intact either way)
+  const cleaned = raw.replace(/^settle the debate:?\s*/i, '').trim();
+  return cleaned || raw;
 }
 
 // Download images attached to a Firestore tweet's `media` field.
@@ -5429,12 +5444,11 @@ async function checkForDebatePosts() {
     const docs = await queryTmaThreadsFirestore(DEBATE_LOOKBACK_MIN, 30);
     const candidates = docs.filter(d =>
       d.published !== false // treat unknown as published if it has a tweetId
-      && d.firstTweetStatus
-      && isDebatePost(d.firstTweetStatus)
+      && isDebatePost(d.categoryIds)
       && !processedDebateDocIds.has(d.docId)
     );
     if (candidates.length === 0) return;
-    console.log(`[debate] Found ${candidates.length} unprocessed debate post(s)`);
+    console.log(`[debate] Found ${candidates.length} unprocessed debate/discussion post(s)`);
 
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
     const jwt = hypefuryToken;
