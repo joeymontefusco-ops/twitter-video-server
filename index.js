@@ -5288,8 +5288,8 @@ async function buildDebateGraphic(question, imagePaths) {
     .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;padding-top:6px}
     .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
     .debate-images{display:flex;gap:20px;flex:1;min-height:0}
-    .debate-img{flex:1;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25)}
-    .debate-img img{width:100%;height:100%;object-fit:cover;display:block}
+    .debate-img{flex:1;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
+    .debate-img img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
   </style></head><body>
     <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
