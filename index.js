@@ -2090,7 +2090,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title, overrideUserId = 
       facebook: null,
       delayBetweenTweets: null,
       tweetMetricsUpdatedAt: null,
-      categories: [],
+      categories: opts.categories || [],
       recurrentPostRef: null,
       replyToTweetId: null,
       replyToTweetInfo: null,
@@ -2472,10 +2472,10 @@ app.post('/test-debate-graphic', async (req, res) => {
 
     const tmpPath = path.join('/tmp', `debate_test_${Date.now()}.png`);
     fs.writeFileSync(tmpPath, graphicBuf);
+    const categoryDocId = categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null;
     try {
-      const twitterResult = await postDebateGraphicToTwitter(tmpPath);
-      await postToFacebook('', [tmpPath]);
-      res.json({ success: true, question, categoryIds, showHeadline, imageCount: imagePaths.length, postedLive: true, twitterResult });
+      const queueResult = await postDebateGraphicToTwitter(tmpPath, categoryDocId);
+      res.json({ success: true, question, categoryIds, categoryDocId, showHeadline, imageCount: imagePaths.length, queuedInAerielab: true, queueResult });
     } finally {
       try { fs.unlinkSync(tmpPath); } catch (e) {}
     }
@@ -5197,7 +5197,7 @@ function buildFullAerielabPostPayload(userId, tweets, opts = {}) {
       tweetIds: null,
       conditionalRetweetsConditions: { delayForRetweet: '1 hour', minRetweetsThreshold: null, minFavoritesThreshold: 5 },
       autoplug: { processed: false, minRetweets: null, minFavorites: 0, templateName: null, status: '' },
-      postNow: true,
+      postNow: opts.postNow !== undefined ? opts.postNow : true,
       source: null,
       writer: null,
       growthProgram: null,
@@ -5207,7 +5207,7 @@ function buildFullAerielabPostPayload(userId, tweets, opts = {}) {
       facebook: null,
       delayBetweenTweets: null,
       tweetMetricsUpdatedAt: null,
-      categories: [],
+      categories: opts.categories || [],
       recurrentPostRef: null,
       replyToTweetId: null,
       replyToTweetInfo: null,
@@ -5436,7 +5436,7 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
       let placements = [];
 
       if (n === 1) {
-        const w = containerWidth * 0.65;
+        const w = containerWidth * 0.9;
         const h = w / imageData[0].ratio;
         const x = (containerWidth - w) / 2;
         placements = [{ src: imageData[0].src, x, y: 0, w, h, row: 0 }];
@@ -5535,11 +5535,23 @@ async function buildDebateGraphic(question, imagePaths, showHeadline = true) {
   } finally { await browser.close(); }
 }
 
-async function postDebateGraphicToTwitter(localImagePath) {
+// Queues the debate graphic in Aerielab for manual review instead of auto-publishing.
+// categoryDocId: the Firestore category doc ID to tag the post with (matches the
+// source post's own category — M27 debate, Discussion Post, etc.)
+async function postDebateGraphicToTwitter(localImagePath, categoryDocId = null) {
   if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
   const token = hypefuryToken;
   const uploaded = await uploadImageVerified(localImagePath, token);
   if (!uploaded) throw new Error('Failed to upload debate graphic to Aerielab');
+
+  const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+  // NOTE: category reference format is a best-effort match to how Firestore stores
+  // it elsewhere (raw referenceValue) — not yet confirmed against what Aerielab's
+  // /api/posts/save endpoint itself expects. Verify the category actually shows up
+  // correctly in Aerielab's queue UI after the first real test.
+  const categories = categoryDocId
+    ? [{ referenceValue: `projects/${project}/databases/(default)/documents/categories/${categoryDocId}` }]
+    : [];
 
   const payload = buildFullAerielabPostPayload(TMA_USER_ID_CONST, [{
     status: '',
@@ -5548,7 +5560,7 @@ async function postDebateGraphicToTwitter(localImagePath) {
     guid: uuidv4(),
     published: false,
     quoteTweetData: null,
-  }]);
+  }], { postNow: false, categories }); // queue for review, don't auto-publish
 
   const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
     headers: {
@@ -5564,25 +5576,23 @@ async function postDebateGraphicToTwitter(localImagePath) {
 }
 
 // Schedule the debate graphic to fire 2 days after the original debate post
-function scheduleDebateGraphic(docId, question, imagePaths, showHeadline = true) {
-  console.log(`[debate] Scheduling graphic for ${docId} in 2 days: "${question.substring(0, 60)}..." (headline: ${showHeadline ? 'shown' : 'hidden'})`);
+function scheduleDebateGraphic(docId, question, imagePaths, showHeadline = true, categoryDocId = null) {
+  console.log(`[debate] Scheduling graphic for ${docId} in 2 days: "${question.substring(0, 60)}..." (headline: ${showHeadline ? 'shown' : 'hidden'}, category: ${categoryDocId || 'none'})`);
   setTimeout(async () => {
     try {
       const graphicBuf = await buildDebateGraphic(question, imagePaths, showHeadline);
       const tmpPath = path.join('/tmp', `debate_graphic_${Date.now()}.png`);
       fs.writeFileSync(tmpPath, graphicBuf);
       try {
-        // Post to Twitter (TMA)
-        await postDebateGraphicToTwitter(tmpPath);
-        console.log(`[debate] Posted graphic to Twitter for ${docId}`);
-        // Post to Facebook (no caption, text baked into graphic)
-        await postToFacebook('', [tmpPath]);
-        console.log(`[debate] Posted graphic to Facebook for ${docId}`);
+        // Queue in Aerielab for manual review instead of auto-publishing live —
+        // tagged with the same category as the source post (debate or discussion).
+        const result = await postDebateGraphicToTwitter(tmpPath, categoryDocId);
+        console.log(`[debate] Queued graphic in Aerielab for ${docId}: postId=${result?.postId || JSON.stringify(result).substring(0, 100)}`);
       } finally {
         try { fs.unlinkSync(tmpPath); } catch (e) {}
       }
     } catch (e) {
-      console.error(`[debate] Failed to post graphic for ${docId}:`, e.message);
+      console.error(`[debate] Failed to queue graphic for ${docId}:`, e.message);
     } finally {
       imagePaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
     }
@@ -5622,7 +5632,9 @@ async function checkForDebatePosts() {
           continue;
         }
         const showHeadline = shouldShowDebateHeadline(doc.categoryIds, question);
-        scheduleDebateGraphic(doc.docId, question, imagePaths, showHeadline);
+        // Tag the queued graphic with whichever debate/discussion category the source post had
+        const categoryDocId = doc.categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null;
+        scheduleDebateGraphic(doc.docId, question, imagePaths, showHeadline, categoryDocId);
       } catch (e) {
         console.error(`[debate] ${doc.docId} failed:`, e.message);
       }
