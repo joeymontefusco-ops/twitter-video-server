@@ -5277,7 +5277,8 @@ async function buildDebateGraphic(question, imagePaths) {
   const qr      = b64(path.join(__dirname, 'qr.png'));
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  const imgTags = imagePaths.slice(0, 2).map(p => {
+  const isTwoImages = imagePaths.length === 2;
+  const imgTags = imagePaths.slice(0, 4).map(p => {
     const data = b64(p);
     const ext = path.extname(p).toLowerCase() === '.jpg' || path.extname(p).toLowerCase() === '.jpeg' ? 'jpeg' : 'png';
     return `<div class="debate-img"><img src="data:image/${ext};base64,${data}"></div>`;
@@ -5287,9 +5288,9 @@ async function buildDebateGraphic(question, imagePaths) {
     ${BASE_CSS}
     .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;padding-top:6px}
     .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
-    .debate-images{display:flex;gap:20px;flex:1;min-height:0}
-    .debate-img{flex:1;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
-    .debate-img img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
+    .debate-images{display:flex;${isTwoImages ? 'flex-direction:column;justify-content:center;' : ''}gap:20px;flex:1;min-height:0}
+    .debate-img{${isTwoImages ? 'width:100%;flex:none;' : 'flex:1;'}border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
+    .debate-img img{${isTwoImages ? 'width:100%;height:auto;' : 'max-width:100%;max-height:100%;width:auto;height:auto;'}object-fit:contain;display:block}
   </style></head><body>
     <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
