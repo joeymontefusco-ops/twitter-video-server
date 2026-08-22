@@ -2424,7 +2424,7 @@ async function createWordPressPost(data) {
 // postLive=false (default) → generates the graphic and returns it as base64 for inspection, doesn't post.
 // postLive=true → actually posts to Twitter + Facebook (real, immediate — skips the 2-day wait).
 app.post('/test-debate-graphic', async (req, res) => {
-  const { docId, postLive, forceShowHeadline } = req.body;
+  const { docId, postLive, forceShowHeadline, skipCategory } = req.body;
   if (!docId) return res.status(400).json({ error: 'Missing docId' });
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
@@ -2474,7 +2474,7 @@ app.post('/test-debate-graphic', async (req, res) => {
 
     const tmpPath = path.join('/tmp', `debate_test_${Date.now()}.png`);
     fs.writeFileSync(tmpPath, graphicBuf);
-    const categoryDocId = categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null;
+    const categoryDocId = skipCategory ? null : (categoryIds.find(id => DEBATE_CATEGORY_IDS.includes(id)) || null);
     console.log(`[test-debate-graphic] Uploading + queuing in Aerielab (categoryDocId=${categoryDocId})...`);
     try {
       const queueResult = await postDebateGraphicToTwitter(tmpPath, categoryDocId);
