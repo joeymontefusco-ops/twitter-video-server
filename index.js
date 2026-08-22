@@ -5277,19 +5277,32 @@ async function buildDebateGraphic(question, imagePaths) {
   const qr      = b64(path.join(__dirname, 'qr.png'));
   const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 
-  const imgTags = imagePaths.slice(0, 4).map(p => {
+  const n = Math.min(imagePaths.length, 6);
+  // Grid shape per count — chosen to keep each image as large as possible while
+  // guaranteeing the whole poster fits one fixed frame (no overflow/scrolling).
+  let cols, rows;
+  if (n <= 1) { cols = 1; rows = 1; }
+  else if (n === 2) { cols = 1; rows = 2; }
+  else if (n === 3) { cols = 2; rows = 2; } // 2 on top, 1 spanning full width below
+  else if (n === 4) { cols = 2; rows = 2; }
+  else if (n === 5) { cols = 3; rows = 2; } // 3 on top, 2 below
+  else { cols = 3; rows = 2; } // 6 images: 3x2
+
+  const imgTags = imagePaths.slice(0, 6).map((p, i) => {
     const data = b64(p);
     const ext = path.extname(p).toLowerCase() === '.jpg' || path.extname(p).toLowerCase() === '.jpeg' ? 'jpeg' : 'png';
-    return `<div class="debate-img"><img src="data:image/${ext};base64,${data}"></div>`;
+    // Special case: 3 images → third one spans both columns (full width) on row 2
+    const spanStyle = (n === 3 && i === 2) ? ' style="grid-column: span 2"' : '';
+    return `<div class="debate-img"${spanStyle}><img src="data:image/${ext};base64,${data}"></div>`;
   }).join('');
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     ${BASE_CSS}
-    .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;padding-top:6px}
+    .debate-wrap{display:flex;flex-direction:column;gap:28px;flex:1;min-height:0;padding-top:6px}
     .debate-question{background:rgba(0,0,0,0.5);border-radius:16px;padding:26px 30px;font-size:34px;font-weight:700;line-height:1.35;text-align:center}
-    .debate-images{display:flex;flex-direction:column;gap:20px}
-    .debate-img{width:100%;border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);line-height:0}
-    .debate-img img{display:block;width:100%;height:auto;object-fit:contain}
+    .debate-images{display:grid;grid-template-columns:repeat(${cols}, 1fr);grid-template-rows:repeat(${rows}, 1fr);gap:20px;flex:1;min-height:0}
+    .debate-img{border-radius:16px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center;min-height:0;min-width:0}
+    .debate-img img{max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;display:block}
   </style></head><body>
     <div class="bg" style="background:url('data:image/png;base64,${brainBg}') center/cover no-repeat"></div>
     <div class="wrap">
