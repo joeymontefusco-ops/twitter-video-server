@@ -5195,7 +5195,7 @@ function buildFullAerielabPostPayload(userId, tweets, opts = {}) {
     post: {
       midnight: new Date(new Date().setHours(0, 0, 0, 0)).toISOString(),
       slotType: 'post',
-      time: new Date().toISOString(),
+      time: opts.time || new Date().toISOString(),
       scheduled: false,
       user: userId,
       publishingError: null,
@@ -5561,6 +5561,10 @@ async function postDebateGraphicToTwitter(localImagePath, categoryDocId = null) 
   // array shape instead, since their API likely constructs the Firestore reference
   // internally from just the ID.
   const categories = categoryDocId ? [categoryDocId] : [];
+  // Schedule 15 min out (confirmed Aerielab published almost immediately when we
+  // sent "now" as the time — this gives a real window to see it in the queue and
+  // review/cancel before it auto-publishes).
+  const futureTime = new Date(Date.now() + 15 * 60 * 1000).toISOString();
 
   const payload = buildFullAerielabPostPayload(TMA_USER_ID_CONST, [{
     status: '',
@@ -5569,7 +5573,7 @@ async function postDebateGraphicToTwitter(localImagePath, categoryDocId = null) 
     guid: uuidv4(),
     published: false,
     quoteTweetData: null,
-  }], { postNow: false, categories }); // queue for review, don't auto-publish
+  }], { postNow: false, categories, time: futureTime }); // queue for review, fires in 15 min
 
   try {
     const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
