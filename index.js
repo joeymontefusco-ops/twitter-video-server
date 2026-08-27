@@ -1702,15 +1702,16 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
 
   const html = `<!doctype html><html><head><meta charset="utf-8"><style>
     ${BASE_CSS}
-    .recap{display:flex;gap:26px;flex:1;min-height:0}
-    .recap .col{flex:1;display:flex;flex-direction:column;gap:22px;min-height:0}
+    .recap{display:flex;flex-direction:column;gap:22px;flex:1;min-height:0}
+    .recap-text{flex:0 0 auto}
     .recap ol{list-style:none;padding:0;margin:0}
     .recap li{background:rgba(0,0,0,0.35);padding:16px 20px;margin-bottom:14px;border-radius:12px;font-size:26px;color:#fff;line-height:1.35}
     .recap li b{color:#4bd0ff;margin-right:8px}
-    .recap-art{flex:1;background:rgba(0,0,0,0.35);border-radius:16px;display:flex;align-items:center;justify-content:center;padding:20px}
-    .recap-art img{max-width:100%;max-height:100%;object-fit:contain}
     .recap-header{background:rgba(0,0,0,0.5);color:#fff;padding:14px 22px;border-radius:12px;font-size:28px;font-weight:800;text-align:center;margin-bottom:16px;letter-spacing:1px}
-    .recap-grid{flex:1;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;background:rgba(0,0,0,0.35);border-radius:16px;padding:16px}
+    .recap-images{flex:1;min-height:0}
+    .recap-art{width:100%;height:100%;background:rgba(0,0,0,0.35);border-radius:16px;display:flex;align-items:center;justify-content:center;padding:20px}
+    .recap-art img{max-width:100%;max-height:100%;object-fit:contain}
+    .recap-grid{width:100%;height:100%;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:12px;background:rgba(0,0,0,0.35);border-radius:16px;padding:16px}
     .recap-grid-cell{border-radius:10px;overflow:hidden;background:rgba(0,0,0,0.25);display:flex;align-items:center;justify-content:center}
     .recap-grid-cell img{width:100%;height:100%;object-fit:cover}
   </style></head><body>
@@ -1722,11 +1723,11 @@ async function buildFacebookSummaryImage(thread, opts = {}) {
       </div>
       <h1>${esc(headline)}</h1>
       <div class="recap">
-        <div class="col">
+        <div class="recap-text">
           <div class="recap-header">RECAP — 16 SPACES BREAKDOWN</div>
           <ol>${sectionSummaries}</ol>
         </div>
-        <div class="col">
+        <div class="recap-images">
           ${gridImgs ? `<div class="recap-grid">${gridImgs}</div>` : `<div class="recap-art"><div style="color:#fff;font-size:24px">THE MADDEN ACADEMY</div></div>`}
         </div>
       </div>
@@ -2480,6 +2481,57 @@ app.post('/test-debate-graphic', async (req, res) => {
       aerielabStatus: err.response?.status,
       aerielabBody: err.response?.data,
     });
+  }
+});
+
+// ─── /test-summary-graphic — dry-run preview of the tmaSummary graphic (no posting) ──
+app.post('/test-summary-graphic', async (req, res) => {
+  const { driveFileId } = req.body;
+  if (!driveFileId) return res.status(400).json({ error: 'Missing driveFileId' });
+  try {
+    const row = await findSheetRow('driveFileId', driveFileId);
+    if (!row) return res.status(404).json({ error: `No sheet row found for driveFileId ${driveFileId}` });
+
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+
+    const quoteTweetData = JSON.parse(row.quoteTweetDataJson || '{}');
+    const cachedSections = (JSON.parse(row.threadDataJson || '{}').sections) || [];
+    let liveTweetTexts = [];
+    try { liveTweetTexts = JSON.parse(row.publishedTweetsJson || '[]'); } catch (e) {}
+    const usingLiveText = liveTweetTexts.length > 0;
+    const sections = cachedSections.map((s, i) => {
+      const liveText = liveTweetTexts[i + 1];
+      return liveText ? { ...s, content: liveText } : s;
+    });
+    const threadForRender = { hook: quoteTweetData.text || '', sections };
+
+    let hookImageLocalPaths = [];
+    try {
+      const hookImageNames = JSON.parse(row.hookImageUrls || '[]');
+      for (let i = 0; i < hookImageNames.length && i < 4; i++) {
+        try {
+          const p = await downloadFromHfStorage(hookImageNames[i], jwt);
+          hookImageLocalPaths.push(p);
+        } catch (e) {
+          console.error(`[test-summary-graphic] Failed to download hook image ${i + 1}:`, e.message);
+        }
+      }
+    } catch (e) {}
+
+    const graphicBuf = await buildFacebookSummaryImage(threadForRender, { hookImagePaths: hookImageLocalPaths });
+    hookImageLocalPaths.forEach(p => { try { fs.unlinkSync(p); } catch (e) {} });
+
+    res.json({
+      success: true,
+      usingLiveText,
+      sectionCount: sections.length,
+      hookImageCount: hookImageLocalPaths.length,
+      message: 'Dry run — graphic generated but NOT posted.',
+      graphicBase64: graphicBuf.toString('base64'),
+    });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
