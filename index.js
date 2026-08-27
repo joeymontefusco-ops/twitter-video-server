@@ -2929,10 +2929,15 @@ app.post('/post-thread', async (req, res) => {
       console.error('[post-thread] madden-school scrape/upload failed (non-fatal):', madErr.message);
     }
 
+    // Whatever actually ends up on the hook/top tweet — madden-school images if the
+    // scrape succeeded, otherwise the first 4 section screenshots as fallback. This is
+    // the REAL top-4 images, and what gets saved for later reuse (e.g. summary graphic).
+    const finalHookMedia = hookMedia.length > 0 ? hookMedia : allSectionMedia.slice(0, 4);
+
     const tweets = tweetTexts.map((text, index) => {
       const section = thread.sections ? thread.sections[index - 1] : null;
       const media = index === 0
-        ? (hookMedia.length > 0 ? hookMedia : allSectionMedia.slice(0, 4))
+        ? finalHookMedia
         : section && sectionMediaMap[section.number] ? [sectionMediaMap[section.number]] : [];
       return {
         status: text,
@@ -3100,8 +3105,8 @@ app.post('/post-thread', async (req, res) => {
           if (Object.keys(sectionRawMediaMap).length > 0) {
             sheetUpdates.sectionRawImageUrls = JSON.stringify(sectionRawMediaMap);
           }
-          if (hookMedia.length > 0) {
-            sheetUpdates.hookImageUrls = JSON.stringify(hookMedia.map(m => m.name).filter(Boolean));
+          if (finalHookMedia.length > 0) {
+            sheetUpdates.hookImageUrls = JSON.stringify(finalHookMedia.map(m => m.name).filter(Boolean));
           }
           sheetUpdates.threadDataJson = JSON.stringify({
             hook: thread.hook || '',
