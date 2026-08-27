@@ -1588,7 +1588,7 @@ async function tryStartDrip(driveFileId) {
 const TMA_DRIP_ORDER = [
   'tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2',
   'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4',
-  'tmaFullVideo', 'tmaSummary', 'tmaLikeGraphic', 'done',
+  'tmaFullVideo', 'tmaSummary', 'done',
 ];
 const TMA_DRIP_DELAYS = {
   tmaClip1:       30 * 60 * 1000,
@@ -1601,7 +1601,6 @@ const TMA_DRIP_DELAYS = {
   tmaChapter4:    30 * 60 * 1000,
   tmaFullVideo:   30 * 60 * 1000,
   tmaSummary:     30 * 60 * 1000,
-  tmaLikeGraphic: 30 * 60 * 1000,
 };
 const activeTmaDrips = new Map();
 const TMA_USER_ID_CONST = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
@@ -1902,16 +1901,6 @@ async function performTmaDripStageAction(driveFileId, stage, row) {
       hookImageLocalPaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
     }
 
-  } else if (stage === 'tmaLikeGraphic') {
-    const cardBuf = await buildFacebookLikeGraphic(threadForRender);
-    const tmpCard = path.join('/tmp', `tma_like_${Date.now()}.png`);
-    fs.writeFileSync(tmpCard, cardBuf);
-    const commentText = `Like this post ❤️ to unlock the 16 Spaces Playbook — free.\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-    try {
-      await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
-    } finally {
-      try { fs.unlinkSync(tmpCard); } catch (e) {}
-    }
   }
 }
 
@@ -2497,7 +2486,7 @@ app.post('/test-debate-graphic', async (req, res) => {
 app.post('/test-tma-drip-stage', async (req, res) => {
   const { driveFileId, stage } = req.body;
   if (!driveFileId || !stage) return res.status(400).json({ error: 'Missing driveFileId or stage' });
-  const validStages = ['tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2', 'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4', 'tmaFullVideo', 'tmaSummary', 'tmaLikeGraphic'];
+  const validStages = ['tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2', 'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4', 'tmaFullVideo', 'tmaSummary'];
   if (!validStages.includes(stage)) {
     return res.status(400).json({ error: `Invalid stage. Must be one of: ${validStages.join(', ')}` });
   }
