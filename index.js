@@ -3721,6 +3721,36 @@ app.post('/test-aerielab-thread', async (req, res) => {
 });
 
 // ─── /test-aerielab-list-categories — list ALL categories for TMA (name → docId) ──
+// ─── /test-bucket-cors-access — check if our token can read/set bucket CORS config ──
+// This tests whether we have Google Cloud Storage admin-level access to the bucket
+// (a different, higher permission tier than normal Firebase Storage file uploads).
+// Almost certainly we don't — Firebase Auth tokens and GCS IAM tokens are different
+// token types — but costs nothing to check definitively rather than assume.
+app.post('/test-bucket-cors-access', async (req, res) => {
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const bucket = process.env.HF_STORAGE_BUCKET || 'curious-meadow-media-pilot-978314735254';
+    const url = `https://storage.googleapis.com/storage/v1/b/${bucket}`;
+    const resp = await axios.get(url, {
+      headers: { Authorization: `Bearer ${hypefuryToken}` },
+      timeout: 15000,
+    });
+    res.json({
+      success: true,
+      message: 'Token CAN read bucket config — we may have admin access!',
+      currentCors: resp.data.cors || null,
+      bucketName: resp.data.name,
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      message: 'Token cannot access bucket-level config (expected — this confirms we need Aerielab to fix CORS on their end)',
+      status: err.response?.status,
+      error: err.response?.data || err.message,
+    });
+  }
+});
+
 app.post('/test-aerielab-list-categories', async (req, res) => {
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
