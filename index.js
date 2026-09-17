@@ -632,8 +632,7 @@ async function sendDiscordMessage(channelId, content, imagePath, botToken) {
 async function uploadImageToHypefury(imagePath, jwtToken) {
   const imageId = uuidv4();
   const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
-const fileName = `${imageId}.png`;
-const thumbnailName = `thumbnail-${imageId}.png`;
+  const fileName = `${imageId}.png`;
   const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
   const fileBuffer = fs.readFileSync(imagePath);
@@ -669,42 +668,19 @@ const thumbnailName = `thumbnail-${imageId}.png`;
     timeout: 30000,
   });
 
-  const thumbInitRes = await axios.post(
-    `${baseUrl}?name=${thumbnailName}`,
-    { name: thumbnailName },
-    {
-      headers: {
-        'Authorization': `Firebase ${jwtToken}`,
-        'X-Goog-Upload-Protocol': 'resumable',
-        'X-Goog-Upload-Command': 'start',
-        'X-Goog-Upload-Header-Content-Length': fileSize.toString(),
-        'X-Goog-Upload-Header-Content-Type': 'image/png',
-        'Content-Type': 'application/json',
-      },
-      timeout: 20000,
-    }
-  );
-
-  const thumbUploadUrl = thumbInitRes.headers['x-goog-upload-url'];
-  if (thumbUploadUrl) {
-    await axios.post(thumbUploadUrl, fileBuffer, {
-      headers: {
-        'Content-Type': 'image/png',
-        'X-Goog-Upload-Command': 'upload, finalize',
-        'X-Goog-Upload-Offset': '0',
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-      timeout: 30000,
-    });
-  }
-
+  // NOTE: previously uploaded a separate "thumbnail" file (a second full-size copy
+  // of the same image under a different name). That second upload had no success
+  // check — if it silently failed, Aerielab's queue would show a broken image icon
+  // referencing a thumbnail file that never got created, even though the main image
+  // upload succeeded fine. Since the "thumbnail" was never actually resized (same
+  // bytes as the main image), pointing it at the same fileName is equivalent and
+  // removes this entire failure mode.
   return {
     name: fileName,
     type: 'image/png',
     size: fileSize,
     altText: 'Madden 27 tips',
-    thumbnail: thumbnailName,
+    thumbnail: fileName,
   };
 }
 
@@ -1238,16 +1214,24 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
     }
   );
   const thumbUploadUrl = thumbInit.headers['x-goog-upload-url'];
+  let thumbUploadSucceeded = false;
   if (thumbUploadUrl) {
-    await axios.post(thumbUploadUrl, thumbBuffer, {
-      headers: {
-        'Content-Type': 'image/png',
-        'X-Goog-Upload-Command': 'upload, finalize',
-        'X-Goog-Upload-Offset': '0',
-      },
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    });
+    try {
+      await axios.post(thumbUploadUrl, thumbBuffer, {
+        headers: {
+          'Content-Type': 'image/png',
+          'X-Goog-Upload-Command': 'upload, finalize',
+          'X-Goog-Upload-Offset': '0',
+        },
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      });
+      thumbUploadSucceeded = true;
+    } catch (e) {
+      console.error(`[upload] Video poster thumbnail upload failed (non-fatal, omitting thumbnail): ${e.message}`);
+    }
+  } else {
+    console.error('[upload] No upload URL returned for video poster thumbnail (non-fatal, omitting thumbnail)');
   }
 
   try { fs.unlinkSync(tmpThumb); } catch (e) {}
@@ -1257,7 +1241,10 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
     type: 'video/mp4',
     size: videoSize,
     altText: '',
-    thumbnail: thumbnailName,
+    // Only reference the thumbnail file if it actually finished uploading — a
+    // reference to a file that was never created shows as a broken image in
+    // Aerielab's queue instead of silently falling back to no thumbnail.
+    ...(thumbUploadSucceeded ? { thumbnail: thumbnailName } : {}),
   };
 }
 
