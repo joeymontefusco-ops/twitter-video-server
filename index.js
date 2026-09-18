@@ -3170,31 +3170,7 @@ try {
         }
 
         const fbText = buildFacebookText(thread);
-        // Post each FB graphic individually, 1 hour apart (first fires immediately, no caption)
-        if (fbCaptionedPaths.length > 0) {
-          const graphicBuffers = fbCaptionedPaths.map(p => ({
-            filename: path.basename(p),
-            buffer: fs.readFileSync(p),
-          }));
-          console.log(`[fb] Scheduling ${graphicBuffers.length} FB graphics: 1 immediate, ${Math.max(0, graphicBuffers.length - 1)} at 1h intervals`);
-          for (let i = 0; i < graphicBuffers.length; i++) {
-            const idx = i;
-            const graphic = graphicBuffers[idx];
-            const delayMs = idx * 60 * 60 * 1000; // 0h, 1h, 2h, ...
-            setTimeout(async () => {
-              const tmpPath = path.join('/tmp', `fb_sched_${Date.now()}_${idx}_${graphic.filename}`);
-              try {
-                fs.writeFileSync(tmpPath, graphic.buffer);
-                await postToFacebook('', [tmpPath]); // empty caption — graphic has text baked in
-                console.log(`[fb] Scheduled graphic ${idx + 1}/${graphicBuffers.length} posted`);
-              } catch (e) {
-                console.error(`[fb] Scheduled graphic ${idx + 1} failed:`, e.message);
-              } finally {
-                try { if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath); } catch (e) {}
-              }
-            }, delayMs);
-          }
-        }
+        await postToFacebook(fbText, fbCaptionedPaths);
       } catch (fbErr) {
         console.error('[fb] Unexpected error posting to Facebook (non-fatal):', fbErr.message);
       } finally {
