@@ -3702,6 +3702,75 @@ app.post('/test-aerielab-thread', async (req, res) => {
 // (a different, higher permission tier than normal Firebase Storage file uploads).
 // Almost certainly we don't — Firebase Auth tokens and GCS IAM tokens are different
 // token types — but costs nothing to check definitively rather than assume.
+// ─── /test-external-media-aerielab — try hosting an image on WordPress (not Aerielab's
+// own Firebase bucket) and queuing an Aerielab post that references it by full URL
+// instead of a bare filename. If Aerielab's queue renders it, external hosting is a
+// viable workaround for the CORS issue on their bucket. If not, their schema is
+// locked to their own storage and we need them to fix CORS on their end.
+app.post('/test-external-media-aerielab', async (req, res) => {
+  try {
+    // Use an existing repo asset as the test image — no need to generate anything new
+    const testImagePath = path.join(__dirname, 'tma-logo.png');
+    if (!fs.existsSync(testImagePath)) {
+      return res.status(400).json({ error: 'tma-logo.png not found in repo for test image' });
+    }
+
+    console.log('[test-external-media] Uploading test image to WordPress...');
+    const wpMedia = await uploadImageToWordPress(testImagePath, 'CORS workaround test', 'cors-test.png');
+    console.log(`[test-external-media] WordPress URL: ${wpMedia.source_url}`);
+
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const token = hypefuryToken;
+
+    // Try several plausible field-name guesses for an external URL, since Aerielab's
+    // schema has only ever been observed with bare filenames pointing at their own bucket.
+    const testMediaObject = {
+      name: '',           // deliberately empty — we don't have a bucket filename for this
+      url: wpMedia.source_url,        // guess #1: a "url" field
+      source_url: wpMedia.source_url, // guess #2: matches WordPress's own field name
+      type: 'image/png',
+      size: fs.statSync(testImagePath).size,
+      altText: 'CORS workaround test',
+      thumbnail: '',
+    };
+
+    const payload = buildFullAerielabPostPayload(TMA_USER_ID_CONST, [{
+      status: '🧪 CORS workaround test — external image hosting (safe to delete)',
+      count: 0,
+      media: [testMediaObject],
+      guid: uuidv4(),
+      published: false,
+      quoteTweetData: null,
+    }], { postNow: false, categories: [], time: new Date(Date.now() + 15 * 60 * 1000).toISOString() });
+
+    const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Origin: 'https://app.aerielab.co',
+        Referer: 'https://app.aerielab.co/queue',
+        'User-Agent': 'Mozilla/5.0',
+      },
+      timeout: 30000,
+    });
+
+    res.json({
+      success: true,
+      wordpressUrl: wpMedia.source_url,
+      queuedInAerielab: true,
+      queueResult: resp.data,
+      message: 'Queued (scheduled 15 min out, will NOT auto-post to Twitter — postNow:false). Check Aerielab queue UI to see if the image renders. If it does, external hosting is a viable workaround. Delete this test post from the queue once checked.',
+    });
+  } catch (err) {
+    res.status(err.response?.status || 500).json({
+      success: false,
+      error: err.message,
+      aerielabStatus: err.response?.status,
+      aerielabBody: err.response?.data,
+    });
+  }
+});
+
 app.post('/test-bucket-cors-access', async (req, res) => {
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
