@@ -3707,6 +3707,70 @@ app.post('/test-aerielab-thread', async (req, res) => {
 // instead of a bare filename. If Aerielab's queue renders it, external hosting is a
 // viable workaround for the CORS issue on their bucket. If not, their schema is
 // locked to their own storage and we need them to fix CORS on their end.
+// ─── /test-storage-upload-diag — raw diagnostic for the Firebase Storage 404-on-upload issue ──
+app.post('/test-storage-upload-diag', async (req, res) => {
+  const results = { steps: [] };
+  try {
+    // Step 1: force a fresh token refresh, don't reuse a possibly-stale cached one
+    results.steps.push({ step: 'refreshing token' });
+    await refreshHypefuryToken();
+    results.steps.push({ step: 'token refreshed', tokenPrefix: hypefuryToken ? hypefuryToken.substring(0, 20) + '...' : null, tokenExpiry: new Date(tokenExpiry).toISOString() });
+
+    const bucket = process.env.HF_STORAGE_BUCKET || 'curious-meadow-media-pilot-978314735254';
+    const testFileName = `diag-test-${Date.now()}.png`;
+    const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
+    results.bucket = bucket;
+    results.testUrl = `${baseUrl}?name=${testFileName}`;
+
+    // Step 2: attempt the exact same init call our real upload code makes, but capture
+    // full raw response details (status, headers, body) regardless of success/failure
+    try {
+      const initRes = await axios.post(
+        `${baseUrl}?name=${testFileName}`,
+        { name: testFileName },
+        {
+          headers: {
+            'Authorization': `Firebase ${hypefuryToken}`,
+            'X-Goog-Upload-Protocol': 'resumable',
+            'X-Goog-Upload-Command': 'start',
+            'X-Goog-Upload-Header-Content-Length': '100',
+            'X-Goog-Upload-Header-Content-Type': 'image/png',
+            'Content-Type': 'application/json',
+          },
+          timeout: 20000,
+          validateStatus: () => true, // don't throw on non-2xx, we want to see everything
+        }
+      );
+      results.initCall = {
+        status: initRes.status,
+        statusText: initRes.statusText,
+        headers: initRes.headers,
+        body: initRes.data,
+        gotUploadUrl: !!initRes.headers['x-goog-upload-url'],
+      };
+    } catch (initErr) {
+      results.initCall = { threwException: true, message: initErr.message, response: initErr.response?.data };
+    }
+
+    // Step 3: also try reading the bucket's root listing, to see if the bucket itself
+    // is reachable at all (separate from the upload-specific init call)
+    try {
+      const listRes = await axios.get(`${baseUrl}?maxResults=1`, {
+        headers: { 'Authorization': `Firebase ${hypefuryToken}` },
+        timeout: 15000,
+        validateStatus: () => true,
+      });
+      results.bucketListCall = { status: listRes.status, body: listRes.data };
+    } catch (listErr) {
+      results.bucketListCall = { threwException: true, message: listErr.message };
+    }
+
+    res.json({ success: true, results });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message, results });
+  }
+});
+
 app.post('/test-external-media-aerielab', async (req, res) => {
   try {
     // Use an existing repo asset as the test image — no need to generate anything new
