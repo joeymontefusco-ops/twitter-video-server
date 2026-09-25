@@ -13,6 +13,23 @@ app.use(express.json({ limit: '10mb' }));
 const PORT = process.env.PORT || 3000;
 const MAX_SIZE_BYTES = 512 * 1024 * 1024;
 
+// Confirmed from AerieLab's live queue on 2026-09-25. Manual uploads are
+// served from this bucket. Transparently remap the known stale Railway value
+// so a deploy fixes uploads even before the environment variable is updated.
+const CURRENT_AERIELAB_STORAGE_BUCKET = 'curious-meadow-production-media';
+const configuredStorageBucket = (process.env.HF_STORAGE_BUCKET || '').trim();
+const LEGACY_AERIELAB_STORAGE_BUCKETS = new Set([
+  'curious-meadow-media-pilot-978314735254',
+  'hypefury-896c7.appspot.com',
+]);
+const AERIELAB_STORAGE_BUCKET = !configuredStorageBucket || LEGACY_AERIELAB_STORAGE_BUCKETS.has(configuredStorageBucket)
+  ? CURRENT_AERIELAB_STORAGE_BUCKET
+  : configuredStorageBucket;
+
+if (configuredStorageBucket && configuredStorageBucket !== AERIELAB_STORAGE_BUCKET) {
+  console.warn(`[storage] Ignoring legacy HF_STORAGE_BUCKET=${configuredStorageBucket}; using ${AERIELAB_STORAGE_BUCKET}`);
+}
+
 const crypto = require('crypto');
 
 // In-memory JWT storage
@@ -633,7 +650,7 @@ async function uploadImageToHypefury(imagePath, jwtToken) {
   const imageId = uuidv4();
   const userId = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
   const fileName = `${imageId}.png`;
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
   const fileBuffer = fs.readFileSync(imagePath);
   const fileSize = fileBuffer.length;
@@ -686,7 +703,7 @@ async function uploadImageToHypefury(imagePath, jwtToken) {
 
 // ─── Verify a Firebase Storage file exists (helps catch race conditions) ──
 async function verifyMediaExists(fileName, jwtToken) {
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(fileName)}`;
   try {
     const r = await axios.get(url, {
@@ -1153,7 +1170,7 @@ async function uploadVideoToHypefury(videoPath, jwtToken) {
   const videoId = uuidv4();
   const fileName = `${videoId}.mp4`;
   const thumbnailName = `thumbnail-${videoId}.png`;
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
 
   const videoBuffer = fs.readFileSync(videoPath);
@@ -1599,7 +1616,7 @@ function nextTmaStage(current) {
 
 // Download an image from Firebase Storage to a local /tmp path
 async function downloadFromHfStorage(fileName, jwtToken) {
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   const encoded = encodeURIComponent(fileName);
   const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
   const p = path.join('/tmp', `tma_dl_${Date.now()}_${uuidv4().substring(0, 8)}.png`);
@@ -2000,7 +2017,7 @@ async function postPromoQuoteTweet(row, quoteTweetData, title, overrideUserId = 
   console.log(`[drip-promo] Found ${imageNames.length} hook images`);
 
   // Download each image from Hypefury Firebase Storage and re-upload for Manu's account
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   const uploadedMedia = [];
 
   for (const imgName of imageNames) {
@@ -2263,7 +2280,7 @@ async function renameDriveFile(driveFileId, title) {
 
 // Download an image from Firebase Storage → local /tmp path (helper for blog images)
 async function downloadFirebaseImageToTmp(fileName, jwtToken, index) {
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   const encoded = encodeURIComponent(fileName);
   const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encoded}?alt=media`;
   const localPath = path.join('/tmp', `blog_img_${Date.now()}_${index}.png`);
@@ -3709,9 +3726,7 @@ app.post('/test-aerielab-thread', async (req, res) => {
 // locked to their own storage and we need them to fix CORS on their end.
 // ─── /test-storage-upload-diag — raw diagnostic for the Firebase Storage 404-on-upload issue ──
 // ─── /test-find-real-bucket — check candidate bucket names to find the current real one ──
-// The custom bucket name we've been using (curious-meadow-media-pilot-978314735254)
-// returns 404 on everything now. This tries the standard Firebase default-bucket
-// naming patterns for the same project, in case Aerielab migrated to one of them.
+// Check the current live bucket first, then legacy/default candidates.
 app.post('/test-find-real-bucket', async (req, res) => {
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
@@ -3719,7 +3734,9 @@ app.post('/test-find-real-bucket', async (req, res) => {
     const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
 
     const candidates = [
-      'curious-meadow-media-pilot-978314735254', // current configured (known broken)
+      AERIELAB_STORAGE_BUCKET,                    // configured/current bucket
+      'curious-meadow-production-media',          // confirmed from manual uploads
+      'curious-meadow-media-pilot-978314735254', // legacy bucket
       `${project}.appspot.com`,                   // classic default bucket naming
       `${project}.firebasestorage.app`,            // new default bucket naming (2024+)
     ];
@@ -3759,7 +3776,7 @@ app.post('/test-storage-upload-diag', async (req, res) => {
     await refreshHypefuryToken();
     results.steps.push({ step: 'token refreshed', tokenPrefix: hypefuryToken ? hypefuryToken.substring(0, 20) + '...' : null, tokenExpiry: new Date(tokenExpiry).toISOString() });
 
-    const bucket = process.env.HF_STORAGE_BUCKET || 'curious-meadow-media-pilot-978314735254';
+    const bucket = AERIELAB_STORAGE_BUCKET;
     const testFileName = `diag-test-${Date.now()}.png`;
     const baseUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o`;
     results.bucket = bucket;
@@ -3881,7 +3898,7 @@ app.post('/test-external-media-aerielab', async (req, res) => {
 app.post('/test-bucket-cors-access', async (req, res) => {
   try {
     if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
-    const bucket = process.env.HF_STORAGE_BUCKET || 'curious-meadow-media-pilot-978314735254';
+    const bucket = AERIELAB_STORAGE_BUCKET;
     const url = `https://storage.googleapis.com/storage/v1/b/${bucket}`;
     const resp = await axios.get(url, {
       headers: { Authorization: `Bearer ${hypefuryToken}` },
@@ -4457,7 +4474,7 @@ app.post('/test-caption', async (req, res) => {
     const media = await uploadImageToHypefury(tmpOut, hypefuryToken);
     try { fs.unlinkSync(tmpOut); } catch (e) {}
 
-    const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+    const bucket = AERIELAB_STORAGE_BUCKET;
     const previewUrl = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o/${encodeURIComponent(media.name)}?alt=media`;
 
     res.json({ success: true, previewUrl, filename: media.name });
@@ -5571,7 +5588,7 @@ function extractDebateQuestion(text) {
 async function downloadTweetMediaImages(mediaFieldValue, jwtToken) {
   const values = mediaFieldValue?.arrayValue?.values || [];
   const localPaths = [];
-  const bucket = process.env.HF_STORAGE_BUCKET || 'hypefury-896c7.appspot.com';
+  const bucket = AERIELAB_STORAGE_BUCKET;
   for (let i = 0; i < values.length; i++) {
     const mediaObj = values[i]?.mapValue?.fields;
     const fileName = mediaObj?.name?.stringValue || null;
