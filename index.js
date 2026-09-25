@@ -3708,6 +3708,49 @@ app.post('/test-aerielab-thread', async (req, res) => {
 // viable workaround for the CORS issue on their bucket. If not, their schema is
 // locked to their own storage and we need them to fix CORS on their end.
 // ─── /test-storage-upload-diag — raw diagnostic for the Firebase Storage 404-on-upload issue ──
+// ─── /test-find-real-bucket — check candidate bucket names to find the current real one ──
+// The custom bucket name we've been using (curious-meadow-media-pilot-978314735254)
+// returns 404 on everything now. This tries the standard Firebase default-bucket
+// naming patterns for the same project, in case Aerielab migrated to one of them.
+app.post('/test-find-real-bucket', async (req, res) => {
+  try {
+    if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
+    const jwt = hypefuryToken;
+    const project = process.env.HF_FIREBASE_PROJECT || 'curious-meadow';
+
+    const candidates = [
+      'curious-meadow-media-pilot-978314735254', // current configured (known broken)
+      `${project}.appspot.com`,                   // classic default bucket naming
+      `${project}.firebasestorage.app`,            // new default bucket naming (2024+)
+    ];
+
+    const results = [];
+    for (const bucket of candidates) {
+      const url = `https://firebasestorage.googleapis.com/v0/b/${bucket}/o?maxResults=1`;
+      try {
+        const resp = await axios.get(url, {
+          headers: { Authorization: `Firebase ${jwt}` },
+          timeout: 15000,
+          validateStatus: () => true,
+        });
+        results.push({
+          bucket,
+          status: resp.status,
+          reachable: resp.status !== 404,
+          sampleFile: resp.data?.items?.[0]?.name || null,
+          body: resp.status !== 200 ? resp.data : undefined,
+        });
+      } catch (e) {
+        results.push({ bucket, error: e.message });
+      }
+    }
+
+    res.json({ success: true, results, recommendation: results.find(r => r.reachable)?.bucket || 'none found reachable' });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post('/test-storage-upload-diag', async (req, res) => {
   const results = { steps: [] };
   try {
