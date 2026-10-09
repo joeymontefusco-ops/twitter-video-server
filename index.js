@@ -1432,21 +1432,26 @@ async function findSheetRow(columnName, value) {
 }
 
 // ─── Drip Quote Tweet Engine ──────────────────────────────────────────────
-// Manages the timed drip chain: promo → clip1 → clip2 → clip3 → full video
+// Manages the timed video-only drip chain: clip1 → clip2 → clip3 → full video.
 
 const activeDrips = new Map(); // driveFileId → timeout reference (for cleanup)
 
 const DRIP_DELAYS = {
-  promo:     20 * 60 * 1000,   // 20 min after publish
-  clip1:     30 * 60 * 1000,   // 30 min after promo
+  clip1:     50 * 60 * 1000,   // preserves the previous first-clip timing
   clip2:     60 * 60 * 1000,   // 1 hr after clip1
   clip3:     60 * 60 * 1000,   // 1 hr after clip2
   fullvideo: 60 * 60 * 1000,   // 1 hr after clip3
 };
 
-const DRIP_ORDER = ['promo', 'clip1', 'clip2', 'clip3', 'fullvideo', 'done'];
+const DRIP_ORDER = ['clip1', 'clip2', 'clip3', 'fullvideo', 'done'];
+
+function dripDelayFor(stage) {
+  return DRIP_DELAYS[stage];
+}
 
 function nextStage(current) {
+  // Migrate an in-progress chain whose last recorded stage was the removed promo.
+  if (current === 'promo') return 'clip1';
   const idx = DRIP_ORDER.indexOf(current);
   return idx >= 0 && idx < DRIP_ORDER.length - 1 ? DRIP_ORDER[idx + 1] : null;
 }
@@ -1478,18 +1483,7 @@ async function executeDripStep(driveFileId, stage) {
     const qtUserIds = (process.env.QT_USER_IDS || process.env.QT_USER_ID || MANU_USER_ID)
       .split(',').map(s => s.trim()).filter(Boolean);
 
-    if (stage === 'promo') {
-      // Promo QT: title + follow line + 4 images from hook (posted from each QT userId)
-      for (const uid of qtUserIds) {
-        try {
-          await postPromoQuoteTweet(row, quoteTweetData, title, uid);
-        } catch (e) {
-          console.error(`[drip-promo] Failed for userId ${uid}:`, e.message);
-        }
-      }
-      // Note: Drive rename + editor notify happen in the watch loop (immediately after publish)
-
-    } else if (stage.startsWith('clip')) {
+    if (stage.startsWith('clip')) {
       const clipIndex = parseInt(stage.replace('clip', '')) - 1;
       if (clipData[clipIndex]) {
         const clipUrl = clipData[clipIndex].url;
@@ -1525,7 +1519,7 @@ async function executeDripStep(driveFileId, stage) {
     // Move to next stage
     const next = nextStage(stage);
     if (next && next !== 'done') {
-      const delay = DRIP_DELAYS[next];
+      const delay = dripDelayFor(next);
       const nextTime = new Date(Date.now() + delay).toISOString();
       await updateSheetRow(row._rowIndex, {
         dripStage: stage,
@@ -1548,7 +1542,7 @@ async function executeDripStep(driveFileId, stage) {
     try {
       const next = nextStage(stage);
       if (next && next !== 'done') {
-        const delay = DRIP_DELAYS[next];
+        const delay = dripDelayFor(next);
         scheduleDripStep(driveFileId, next, delay);
       }
     } catch (e) {
@@ -1568,9 +1562,10 @@ function startDripChain(driveFileId) {
     console.log(`[drip] Drip already active for ${driveFileId} — skipping`);
     return;
   }
-  const delay = DRIP_DELAYS.promo;
+  const firstStage = 'clip1';
+  const delay = dripDelayFor(firstStage);
   console.log(`[drip] Starting drip chain for ${driveFileId}`);
-  scheduleDripStep(driveFileId, 'promo', delay);
+  scheduleDripStep(driveFileId, firstStage, delay);
 }
 
 async function tryStartDrip(driveFileId) {
@@ -1587,31 +1582,35 @@ async function tryStartDrip(driveFileId) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// TMA-only drip chain (11 stages, 6 hours total, TMA account only)
+// TMA-only video drip chain.
 // ═══════════════════════════════════════════════════════════════════════════
-const TMA_DRIP_ORDER = [
-  'tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2',
-  'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4',
-  'tmaFullVideo', 'tmaSummary', 'done',
-];
+const TMA_DRIP_ORDER = ['tmaClip1', 'tmaClip2', 'tmaClip3', 'tmaFullVideo', 'done'];
 const TMA_DRIP_DELAYS = {
   tmaClip1:       30 * 60 * 1000,
-  tmaChapter1:    30 * 60 * 1000,
-  tmaClip2:       60 * 60 * 1000,
-  tmaChapter2:    30 * 60 * 1000,
-  tmaClip3:       30 * 60 * 1000,
-  tmaChapter3:    30 * 60 * 1000,
-  tmaCfbPics:     30 * 60 * 1000,
-  tmaChapter4:    30 * 60 * 1000,
-  tmaFullVideo:   30 * 60 * 1000,
-  tmaSummary:     30 * 60 * 1000,
+  tmaClip2:       90 * 60 * 1000,  // preserve previous absolute schedule
+  tmaClip3:       60 * 60 * 1000,
+  tmaFullVideo:  120 * 60 * 1000,
 };
 const activeTmaDrips = new Map();
 const TMA_USER_ID_CONST = 'pLvmUtGBDvhoaiQRRkWVy29QwMr1';
 
 function nextTmaStage(current) {
+  // Migrate rows that were already inside a removed graphic stage.
+  const removedGraphicNext = {
+    tmaChapter1: 'tmaClip2',
+    tmaChapter2: 'tmaClip3',
+    tmaChapter3: 'tmaFullVideo',
+    tmaCfbPics: 'tmaFullVideo',
+    tmaChapter4: 'tmaFullVideo',
+    tmaSummary: 'done',
+  };
+  if (removedGraphicNext[current]) return removedGraphicNext[current];
   const idx = TMA_DRIP_ORDER.indexOf(current);
   return idx >= 0 && idx < TMA_DRIP_ORDER.length - 1 ? TMA_DRIP_ORDER[idx + 1] : null;
+}
+
+function tmaDripDelayFor(stage) {
+  return TMA_DRIP_DELAYS[stage];
 }
 
 // Download an image from Firebase Storage to a local /tmp path
@@ -1627,47 +1626,6 @@ async function downloadFromHfStorage(fileName, jwtToken) {
   });
   fs.writeFileSync(p, Buffer.from(r.data));
   return p;
-}
-
-// Post a single graphic (local PNG) as a quote tweet from TMA
-async function postGraphicQuoteTweet(localImagePath, quoteTweetData, commentText, userId) {
-  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
-  const token = hypefuryToken;
-  console.log(`[graphic-qt] Uploading graphic ${path.basename(localImagePath)} for user ${userId}, QT tweetId=${quoteTweetData?.tweetId || 'none'}`);
-  const uploaded = await uploadImageVerified(localImagePath, token);
-  if (!uploaded) throw new Error('Failed to upload graphic to Aerielab');
-  console.log(`[graphic-qt] Image uploaded to Firebase OK, now saving post to Aerielab queue...`);
-
-  const payload = buildFullAerielabPostPayload(userId, [{
-    status: commentText,
-    count: 0,
-    media: [uploaded],
-    guid: uuidv4(),
-    published: false,
-    quoteTweetData,
-  }]);
-
-  try {
-    const resp = await axios.post('https://app.aerielab.co/api/posts/save', payload, {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'Content-Type': 'application/json',
-        Origin: 'https://app.aerielab.co',
-        Referer: 'https://app.aerielab.co/queue',
-        'User-Agent': 'Mozilla/5.0',
-      },
-      timeout: 30000,
-    });
-    console.log(`[graphic-qt] ✅ Graphic QT saved to Aerielab queue: postId=${resp.data?.postId || JSON.stringify(resp.data).substring(0, 100)}`);
-    return resp.data;
-  } catch (err) {
-    console.error(`[graphic-qt] ❌ Aerielab save failed: ${err.message}`);
-    if (err.response) {
-      console.error(`[graphic-qt]   status: ${err.response.status}`);
-      console.error(`[graphic-qt]   body: ${JSON.stringify(err.response.data).substring(0, 500)}`);
-    }
-    throw err;
-  }
 }
 
 // Build the summary graphic (recap of all sections + 16 Spaces playbook art)
@@ -1803,38 +1761,12 @@ async function buildFacebookLikeGraphic(thread, opts = {}) {
 async function performTmaDripStageAction(driveFileId, stage, row) {
   const quoteTweetData = JSON.parse(row.quoteTweetDataJson || '{}');
   const clipData = JSON.parse(row.clipUrls || '[]');
-  const rawSectionImages = JSON.parse(row.sectionRawImageUrls || '{}');
   const title = (quoteTweetData.text || '').split('\n')[0].replace(/^TRENDING:\s*/i, '').trim();
   const uid = TMA_USER_ID_CONST;
   const handle = '@MaddenAcademy_';
   console.log(`[tma-drip] Executing stage "${stage}" for ${driveFileId}`);
 
-  // Parse thread structure from cached threadDataJson, but overlay Manu's FINAL edited
-  // tweet text (captured live at publish time) onto each section — cached draft is the
-  // fallback only if live text isn't available.
-  const cachedSections = (JSON.parse(row.threadDataJson || '{}').sections) || [];
-  let liveTweetTexts = [];
-  try { liveTweetTexts = JSON.parse(row.publishedTweetsJson || '[]'); } catch (e) {}
-  const sectionsWithLiveText = cachedSections.map((s, i) => {
-    // Published order: [0]=hook, [1..N]=sections in order, then testimonial + CTA at the end.
-    // Section i (0-indexed) maps to tweetsArr[i+1].
-    const liveText = liveTweetTexts[i + 1];
-    return liveText ? { ...s, content: liveText } : s;
-  });
-  if (liveTweetTexts.length > 0) {
-    console.log(`[tma-drip] Using Manu's final published tweet text for ${sectionsWithLiveText.length} section(s) (from publishedTweetsJson)`);
-  } else {
-    console.log(`[tma-drip] No publishedTweetsJson found — using cached draft content (may not reflect Manu's edits)`);
-  }
-  const threadForRender = {
-    hook: quoteTweetData.text || '',
-    sections: sectionsWithLiveText,
-  };
-
-  if (!hypefuryToken || Date.now() > tokenExpiry) await refreshHypefuryToken();
-  const jwt = hypefuryToken;
-
-  if (stage.startsWith('tmaClip') && stage !== 'tmaChapter') {
+  if (stage.startsWith('tmaClip')) {
     const clipIdx = parseInt(stage.replace('tmaClip', '')) - 1;
     if (clipData[clipIdx]) {
       const commentText = `${title} Part ${clipIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
@@ -1843,69 +1775,10 @@ async function performTmaDripStageAction(driveFileId, stage, row) {
       console.log(`[tma-drip] No clip at index ${clipIdx} — skipping ${stage}`);
     }
 
-  } else if (stage.startsWith('tmaChapter')) {
-    const chapterIdx = parseInt(stage.replace('tmaChapter', '')) - 1;
-    const sections = threadForRender.sections;
-    if (!sections[chapterIdx]) {
-      console.log(`[tma-drip] No section ${chapterIdx + 1} — skipping ${stage} (if applies)`);
-    } else {
-      // Download raw section frame from Firebase
-      const rawFileName = rawSectionImages[chapterIdx + 1] || rawSectionImages[String(chapterIdx + 1)];
-      if (!rawFileName) throw new Error(`No raw section image URL for section ${chapterIdx + 1}`);
-      const localFrame = await downloadFromHfStorage(rawFileName, jwt);
-      try {
-        const cardBuf = await buildFacebookSectionImage(localFrame, sections[chapterIdx], chapterIdx, sections.length, threadForRender);
-        const tmpCard = path.join('/tmp', `tma_chapter_${Date.now()}_${chapterIdx + 1}.png`);
-        fs.writeFileSync(tmpCard, cardBuf);
-        const commentText = `${title} — Chapter ${chapterIdx + 1}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-        try {
-          await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
-        } finally {
-          try { fs.unlinkSync(tmpCard); } catch (e) {}
-        }
-      } finally {
-        try { fs.unlinkSync(localFrame); } catch (e) {}
-      }
-    }
-
-  } else if (stage === 'tmaCfbPics') {
-    await postPromoQuoteTweet(row, quoteTweetData, title, uid);
-
   } else if (stage === 'tmaFullVideo') {
     const driveUrl = `https://drive.usercontent.google.com/download?id=${row.driveFileId}&export=download&confirm=t`;
     const commentText = `${title}\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
     await postClipQuoteTweet(driveUrl, quoteTweetData, commentText, uid);
-
-  } else if (stage === 'tmaSummary') {
-    let hookImageLocalPaths = [];
-    try {
-      const hookImageNames = JSON.parse(row.hookImageUrls || '[]');
-      for (let i = 0; i < hookImageNames.length && i < 4; i++) {
-        try {
-          const p = await downloadFromHfStorage(hookImageNames[i], jwt);
-          hookImageLocalPaths.push(p);
-        } catch (e) {
-          console.error(`[tma-drip] Failed to download hook image ${i + 1} for summary:`, e.message);
-        }
-      }
-    } catch (e) {}
-    if (hookImageLocalPaths.length === 0) {
-      console.log(`[tma-drip] No hookImageUrls available — summary graphic will use fallback (no images)`);
-    }
-    try {
-      const cardBuf = await buildFacebookSummaryImage(threadForRender, { hookImagePaths: hookImageLocalPaths });
-      const tmpCard = path.join('/tmp', `tma_summary_${Date.now()}.png`);
-      fs.writeFileSync(tmpCard, cardBuf);
-      const commentText = `${title} — Recap\n\nFollow ${handle} for daily help mastering Madden 27's MENTAL chess match`;
-      try {
-        await postGraphicQuoteTweet(tmpCard, quoteTweetData, commentText, uid);
-      } finally {
-        try { fs.unlinkSync(tmpCard); } catch (e) {}
-      }
-    } finally {
-      hookImageLocalPaths.forEach(p => { try { if (fs.existsSync(p)) fs.unlinkSync(p); } catch (e) {} });
-    }
-
   }
 }
 
@@ -1951,7 +1824,7 @@ async function executeTmaDripStep(driveFileId, stage) {
 
     const next = nextTmaStage(stage);
     if (next && next !== 'done') {
-      const delay = TMA_DRIP_DELAYS[next];
+      const delay = tmaDripDelayFor(next);
       const nextTime = new Date(Date.now() + delay).toISOString();
       await updateSheetRow(row._rowIndex, {
         tmaDripStage: stage,
@@ -1973,7 +1846,7 @@ async function executeTmaDripStep(driveFileId, stage) {
     try {
       const next = nextTmaStage(stage);
       if (next && next !== 'done') {
-        const delay = TMA_DRIP_DELAYS[next];
+        const delay = tmaDripDelayFor(next);
         scheduleTmaDripStep(driveFileId, next, delay);
       }
     } catch (e) {
@@ -1993,7 +1866,7 @@ function startTmaDripChain(driveFileId) {
     console.log(`[tma-drip] Already active for ${driveFileId} — skipping`);
     return;
   }
-  const delay = TMA_DRIP_DELAYS.tmaClip1;
+  const delay = tmaDripDelayFor('tmaClip1');
   console.log(`[tma-drip] Starting TMA drip chain for ${driveFileId}`);
   scheduleTmaDripStep(driveFileId, 'tmaClip1', delay);
 }
@@ -2542,7 +2415,7 @@ app.post('/test-summary-graphic', async (req, res) => {
 app.post('/test-tma-drip-stage', async (req, res) => {
   const { driveFileId, stage } = req.body;
   if (!driveFileId || !stage) return res.status(400).json({ error: 'Missing driveFileId or stage' });
-  const validStages = ['tmaClip1', 'tmaChapter1', 'tmaClip2', 'tmaChapter2', 'tmaClip3', 'tmaChapter3', 'tmaCfbPics', 'tmaChapter4', 'tmaFullVideo', 'tmaSummary'];
+  const validStages = ['tmaClip1', 'tmaClip2', 'tmaClip3', 'tmaFullVideo'];
   if (!validStages.includes(stage)) {
     return res.status(400).json({ error: `Invalid stage. Must be one of: ${validStages.join(', ')}` });
   }
@@ -2717,8 +2590,7 @@ async function resumeDrips() {
     for (const row of rows) {
       // Manu chain
       if (row.dripStage && row.dripStage !== 'done' && row.dripStage !== 'waiting' && !activeDrips.has(row.driveFileId)) {
-        const currentIdx = DRIP_ORDER.indexOf(row.dripStage);
-        const nextStageVal = currentIdx >= 0 ? DRIP_ORDER[currentIdx + 1] : null;
+        const nextStageVal = nextStage(row.dripStage);
         if (nextStageVal && nextStageVal !== 'done') {
           const nextTime = row.nextDripAt ? Date.parse(row.nextDripAt) : 0;
           const overdueBy = now - nextTime;
@@ -2734,8 +2606,7 @@ async function resumeDrips() {
 
       // TMA chain (independent recovery)
       if (row.tmaDripStage && row.tmaDripStage !== 'done' && row.tmaDripStage !== 'waiting' && !activeTmaDrips.has(row.driveFileId)) {
-        const tmaIdx = TMA_DRIP_ORDER.indexOf(row.tmaDripStage);
-        const nextTmaVal = tmaIdx >= 0 ? TMA_DRIP_ORDER[tmaIdx + 1] : null;
+        const nextTmaVal = nextTmaStage(row.tmaDripStage);
         if (nextTmaVal && nextTmaVal !== 'done') {
           const nextTime = row.tmaNextDripAt ? Date.parse(row.tmaNextDripAt) : 0;
           const overdueBy = now - nextTime;
@@ -6009,12 +5880,9 @@ function startRecurringRepostPoller() {
 
 app.listen(PORT, () => {
   console.log(`Twitter video server running on port ${PORT}`);
+  console.log('[twitter-graphics] Automated Twitter graphic posts removed; thread screenshots and video QTs remain enabled');
   refreshHypefuryToken();
   // Resume any in-progress drips after restart
   setTimeout(() => resumeDrips(), 10000); // wait 10s for token to be ready
   setTimeout(() => resumeWatches(), 12000); // slightly after drips to avoid race
-  // Start Aerielab recurring-repost poller (5 min interval)
-  startRecurringRepostPoller();
-  // Start "Settle the Debate" graphic poller (15 min interval)
-  startDebateGraphicPoller();
 });
