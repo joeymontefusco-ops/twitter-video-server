@@ -6,6 +6,7 @@ const { execSync, exec } = require('child_process');
 const FormData = require('form-data');
 const puppeteer = require('puppeteer');
 const { v4: uuidv4 } = require('uuid');
+const { SEO_BLOG_PENDING, seoBlogHandoffMarker, railwayMayPublishBlog } = require('./seoBlogHandoff');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
@@ -1389,7 +1390,7 @@ async function readSheet() {
   });
 }
 
-async function updateSheetRow(rowIndex, updates) {
+async function updateSheetRow(rowIndex, updates, { requireColumns = [] } = {}) {
   const token = await getSheetsAccessToken();
 
   const headersRes = await axios.get(
@@ -1397,6 +1398,7 @@ async function updateSheetRow(rowIndex, updates) {
     { headers: { Authorization: `Bearer ${token}` } }
   );
   const headers = headersRes.data.values?.[0] || [];
+  if (requireColumns.some((name) => !headers.includes(name))) throw new Error('Required Sheet handoff column missing');
 
   const data = [];
   for (const [key, value] of Object.entries(updates)) {
@@ -2443,6 +2445,9 @@ app.post('/test-blog-post', async (req, res) => {
   try {
     const row = await findSheetRow('driveFileId', driveFileId);
     if (!row) return res.status(404).json({ error: `No sheet row found for driveFileId ${driveFileId}` });
+    if (row.blogPostId === SEO_BLOG_PENDING) {
+      return res.status(409).json({ success: false, error: 'SEO owns this WordPress post' });
+    }
     if (force && row.blogPostId) {
       console.log(`[test-blog-post] force=true, ignoring existing blogPostId=${row.blogPostId}`);
       row.blogPostId = ''; // bypass dedup check for this test call
@@ -2458,6 +2463,10 @@ app.post('/test-blog-post', async (req, res) => {
 });
 
 async function autoCreateBlogPost(driveFileId, row) {
+  if (!railwayMayPublishBlog(row)) {
+    console.log(`[blog] WordPress ownership is elsewhere for ${driveFileId} — skipping Railway publisher`);
+    return null;
+  }
   // Dedup: if blogPostId already exists in sheet, skip
   if (row.blogPostId && String(row.blogPostId).trim().length > 0) {
     console.log(`[blog] Post already exists for ${driveFileId} (id=${row.blogPostId}) — skipping`);
@@ -4398,6 +4407,7 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
 
             const quoteTweetData = {
               text: firstTweetText,
+              publishedAt: new Date().toISOString(),
               userProfilePictureURL: 'https://pbs.twimg.com/profile_images/1683535076552785925/NW4iUAkc_normal.jpg',
               userDisplayName: 'TheMaddenAcademy',
               username: handle,
@@ -4407,11 +4417,19 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
 
             const row = await findSheetRow('driveFileId', driveFileId);
             if (row) {
+              const handoffMarker = seoBlogHandoffMarker(row);
               await updateSheetRow(row._rowIndex, {
                 threadPublished: 'true',
                 quoteTweetDataJson: JSON.stringify(quoteTweetData),
                 publishedTweetsJson: JSON.stringify(allTweetTexts),
-              });
+                ...(handoffMarker ? { blogPostId: handoffMarker } : {}),
+              }, { requireColumns: handoffMarker ? ['blogPostId'] : [] });
+              if (handoffMarker) {
+                const saved = await findSheetRow('driveFileId', driveFileId);
+                if (saved?.blogPostId !== SEO_BLOG_PENDING || saved?.threadPublished !== 'true'
+                  || saved?.quoteTweetDataJson !== JSON.stringify(quoteTweetData))
+                  throw new Error('SEO handoff marker did not survive Sheet readback');
+              }
               console.log(`[watch] Sheet updated for ${driveFileId}`);
 
               // Rename Drive file + notify editor — but only if not already notified for this row
@@ -4434,7 +4452,8 @@ async function watchThreadForPublish(hypefuryPostId, driveFileId) {
 
               await tryStartDrip(driveFileId);
 
-              // Auto-generate WordPress blog post from thread (fire-and-forget, deduped by blogPostId)
+              // The SEO marker and feature switch both block Railway WordPress writes.
+              // Legacy rows retain the existing Railway publisher when the switch is off.
               (async () => {
                 try {
                   await autoCreateBlogPost(driveFileId, row);
